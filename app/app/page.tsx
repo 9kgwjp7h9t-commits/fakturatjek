@@ -14,9 +14,11 @@ export default function Home() {
           </h1>
 
           <p className="mt-6 text-xl leading-8 text-slate-300">
-  FakturaTjek hjælper håndværksvirksomheder med at finde afsluttede
-  opgaver, timer, materialer og forfaldne fakturaer, som bør kontrolleres.
-  Upload en simpel CSV-fil og få en konkret handleliste.
+         <p className="mt-6 text-xl leading-8 text-slate-300">
+           FakturaTjek sammenligner registrerede opgaver, timer, materialer og
+           forfaldne fakturaer med dine fakturaer. På få sekunder får du en konkret
+           liste over poster, der mangler opfølgning, fakturering eller manuel kontrol.
+</p>
 </p>
 
           <div className="mt-10 flex flex-col gap-4 sm:flex-row">
@@ -61,7 +63,7 @@ export default function Home() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
             <h2 className="text-xl font-bold">Ugentlig handleliste</h2>
             <p className="mt-3 text-slate-400">
-              Sender en konkret liste over ting, ejeren bør tjekke og følge op på.
+              Sender en konkret liste over ting, som bør tjekkes og følges op på.
             </p>
           </div>
         </div>
