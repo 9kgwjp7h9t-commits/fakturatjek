@@ -205,8 +205,12 @@ export default function UploadPage() {
             className="grid grid-cols-1 gap-4 p-6 md:grid-cols-12 md:items-start"
           >
             <div className="md:col-span-2">
-              <p className="font-semibold">{row.type || "Ukendt"}</p>
-              <p className="text-sm text-red-200/70">{row.status}</p>
+              <p className="font-semibold uppercase tracking-wide">
+              {row.type || "Ukendt"}
+              </p>
+              <p className="text-sm uppercase tracking-wide text-red-200/70">
+             {row.status}
+              </p>
             </div>
 
             <div className="md:col-span-3">

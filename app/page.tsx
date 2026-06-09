@@ -14,25 +14,33 @@ export default function Home() {
           </h1>
 
           <p className="mt-6 text-xl leading-8 text-slate-300">
-            FakturaTjek hjælper håndværksvirksomheder med at finde afsluttede
-            opgaver, timer og materialer, som ikke ser ud til at være faktureret.
-          </p>
+  FakturaTjek hjælper håndværksvirksomheder med at finde afsluttede
+  opgaver, timer, materialer og forfaldne fakturaer, som bør kontrolleres.
+  Upload en simpel CSV-fil og få en konkret handleliste.
+</p>
 
           <div className="mt-10 flex flex-col gap-4 sm:flex-row">
-            <Link
-              href="/demo"
-              className="rounded-xl bg-red-500 px-6 py-4 text-center font-semibold text-white hover:bg-red-600"
-            >
-              Se demo
-            </Link>
+  <Link
+    href="/demo"
+    className="rounded-xl bg-red-500 px-6 py-4 text-center font-semibold text-white hover:bg-red-600"
+  >
+    Se demo
+  </Link>
 
-            <a
-              href="mailto:kontakt@fakturatjek.dk"
-              className="rounded-xl border border-slate-700 px-6 py-4 text-center font-semibold text-white hover:bg-slate-900"
-            >
-              Book gennemgang
-            </a>
-          </div>
+  <Link
+    href="/upload"
+    className="rounded-xl border border-red-500/40 bg-red-500/10 px-6 py-4 text-center font-semibold text-red-200 hover:bg-red-500/20"
+  >
+    Prøv CSV-import
+  </Link>
+
+  <a
+    href="mailto:kontakt@fakturatjek.dk"
+    className="rounded-xl border border-slate-700 px-6 py-4 text-center font-semibold text-white hover:bg-slate-900"
+  >
+    Book gennemgang
+  </a>
+</div>
         </div>
 
         <div className="mt-16 grid gap-4 md:grid-cols-3">
