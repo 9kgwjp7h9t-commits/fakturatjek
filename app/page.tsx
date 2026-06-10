@@ -15,8 +15,8 @@ export default function Home() {
 
           <p className="mt-6 text-xl leading-8 text-slate-300">
          <p className="mt-6 text-xl leading-8 text-slate-300">
-           FakturaTjek sammenligner registrerede opgaver, timer, materialer og
-           forfaldne fakturaer med dine fakturaer. På få sekunder får du en konkret
+           FakturaTjek sammenligner registrerede opgaver, timer og materialer
+            med dine fakturaer. På få sekunder får du en konkret
            liste over poster, der mangler opfølgning, fakturering eller manuel kontrol.
 </p>
 </p>
