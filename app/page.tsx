@@ -77,8 +77,8 @@ export default function Home() {
             </h2>
 
             <p className="mt-4 text-slate-400">
-              Du behøver ikke skifte system. Start med to simple CSV-eksporter
-              fra de systemer, virksomheden allerede bruger.
+              Start med to simple CSV-filer, som du nemt kan hente ud
+              fra de systemer, du allerede bruger.
             </p>
           </div>
 
@@ -96,7 +96,7 @@ export default function Home() {
               <p className="text-sm font-semibold text-red-400">2</p>
               <h3 className="mt-2 font-bold">Eksportér fakturaer</h3>
               <p className="mt-2 text-sm text-slate-400">
-                Hent en CSV med fakturaer, kunder, projekter, beløb og
+                Hent en CSV med fakturaer, kunder, projekter, materialer, timer, beløb og
                 betalingsstatus.
               </p>
             </div>
