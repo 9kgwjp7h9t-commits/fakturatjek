@@ -162,7 +162,7 @@ export default function DemoPage() {
             </Link>
 
             <a
-              href="mailto:kontakt@fakturatjek.dk"
+              href="mailto:kontakt@fakturatjek.net"
               className="rounded-xl border border-slate-700 px-6 py-4 text-center font-semibold text-white hover:bg-slate-900"
             >
               Book gennemgang

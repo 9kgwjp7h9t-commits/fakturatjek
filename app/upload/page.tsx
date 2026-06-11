@@ -3,8 +3,19 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
-type CsvRow = {
-  type?: string;
+type OrderRow = {
+  opgave_id?: string;
+  kunde?: string;
+  projekt?: string;
+  status?: string;
+  timer?: string;
+  materialer_beloeb?: string;
+  dato?: string;
+  [key: string]: string | undefined;
+};
+
+type InvoiceRow = {
+  faktura_id?: string;
   kunde?: string;
   projekt?: string;
   status?: string;
@@ -13,7 +24,19 @@ type CsvRow = {
   [key: string]: string | undefined;
 };
 
-function parseCsv(text: string): CsvRow[] {
+type Problem = {
+  type: "opgave" | "timer" | "materialer" | "faktura";
+  kunde: string;
+  projekt: string;
+  status: string;
+  dato?: string;
+  amount: number;
+  title: string;
+  explanation: string;
+  action: string;
+};
+
+function parseCsv<T extends Record<string, string | undefined>>(text: string): T[] {
   const lines = text
     .trim()
     .split("\n")
@@ -26,113 +49,190 @@ function parseCsv(text: string): CsvRow[] {
 
   return lines.slice(1).map((line) => {
     const values = line.split(",").map((v) => v.trim());
-    const row: CsvRow = {};
+    const row: Record<string, string> = {};
 
     headers.forEach((header, index) => {
       row[header] = values[index] ?? "";
     });
 
-    return row;
+    return row as T;
   });
 }
 
-function formatCurrency(value: string | number | undefined) {
+function toNumber(value: string | number | undefined) {
   const numberValue =
-    typeof value === "number" ? value : Number(String(value || "0").replace(",", "."));
+    typeof value === "number"
+      ? value
+      : Number(String(value || "0").replace(",", "."));
 
+  return Number.isNaN(numberValue) ? 0 : numberValue;
+}
+
+function formatCurrency(value: string | number | undefined) {
   return new Intl.NumberFormat("da-DK", {
     style: "currency",
     currency: "DKK",
     maximumFractionDigits: 0,
-  }).format(Number.isNaN(numberValue) ? 0 : numberValue);
+  }).format(toNumber(value));
 }
 
-function isProblem(row: CsvRow) {
-  const status = (row.status || "").toLowerCase();
+function normalize(value: string | undefined) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function getMatchKey(kunde?: string, projekt?: string) {
+  return `${normalize(kunde)}|${normalize(projekt)}`;
+}
+
+function isPaidInvoice(invoice: InvoiceRow) {
+  const status = normalize(invoice.status);
 
   return (
-    status.includes("afsluttet") ||
-    status.includes("ikke faktureret") ||
-    status.includes("forfalden")
+    status.includes("betalt") ||
+    status.includes("sendt") ||
+    status.includes("faktureret")
   );
 }
-function getProblemExplanation(row: CsvRow) {
-  const type = (row.type || "").toLowerCase();
-  const status = (row.status || "").toLowerCase();
-  const kunde = row.kunde || "kunden";
-  const projekt = row.projekt || "projektet";
-  const beloeb = formatCurrency(row.beloeb);
 
-  if (type.includes("opgave") && status.includes("afsluttet")) {
-    return {
-      title: "Afsluttet opgave uden tydelig fakturering",
-      explanation: `Opgaven "${projekt}" hos ${kunde} er markeret som afsluttet. Den bør kontrolleres, fordi afsluttede opgaver normalt skal faktureres kort tid efter færdiggørelse.`,
-      action: `Tjek om der er oprettet en faktura på ca. ${beloeb}. Hvis ikke, bør opgaven faktureres eller markeres som ikke-fakturerbar.`,
-    };
-  }
+function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem[] {
+  const problems: Problem[] = [];
 
-  if (type.includes("time") && status.includes("ikke faktureret")) {
-    return {
-      title: "Registrerede timer er ikke faktureret",
-      explanation: `Der er registreret timer på "${projekt}" hos ${kunde}, men posten står som ikke faktureret. Det kan betyde, at arbejdstid er leveret uden at blive sendt videre til kunden.`,
-      action: `Tjek timesedlerne og overfør timerne til faktura, hvis arbejdet skal betales. Estimeret værdi: ${beloeb}.`,
-    };
-  }
+  const invoiceMap = new Map<string, InvoiceRow[]>();
 
-  if (type.includes("materiale") && status.includes("ikke faktureret")) {
-    return {
-      title: "Materialer mangler muligvis på faktura",
-      explanation: `Der er registreret materialeforbrug på "${projekt}" hos ${kunde}, men materialerne står som ikke faktureret. Det kan betyde, at virksomheden selv betaler for materialer, som kunden burde betale for.`,
-      action: `Sammenlign materialelisten med fakturaen. Hvis materialerne mangler, bør de tilføjes. Estimeret værdi: ${beloeb}.`,
-    };
-  }
+  invoiceRows.forEach((invoice) => {
+    const key = getMatchKey(invoice.kunde, invoice.projekt);
+    const existing = invoiceMap.get(key) || [];
+    existing.push(invoice);
+    invoiceMap.set(key, existing);
+  });
 
-  if (type.includes("faktura") && status.includes("forfalden")) {
-    return {
-      title: "Faktura er forfalden",
-      explanation: `Fakturaen til ${kunde} på "${projekt}" er markeret som forfalden. Det betyder, at betalingen sandsynligvis ikke er kommet ind til tiden.`,
-      action: `Send betalingspåmindelse eller ring til kunden. Beløb til opfølgning: ${beloeb}.`,
-    };
-  }
+  orderRows.forEach((order) => {
+    const kunde = order.kunde || "Ukendt kunde";
+    const projekt = order.projekt || "Ukendt projekt";
+    const status = normalize(order.status);
+    const key = getMatchKey(order.kunde, order.projekt);
+    const matchingInvoices = invoiceMap.get(key) || [];
+    const hasInvoice = matchingInvoices.some(isPaidInvoice);
 
-  if (status.includes("ikke faktureret")) {
-    return {
-      title: "Posten er ikke faktureret",
-      explanation: `Denne post hos ${kunde} står som ikke faktureret. Den bør kontrolleres, fordi der kan ligge omsætning, som endnu ikke er sendt til kunden.`,
-      action: `Tjek om posten skal med på en eksisterende eller ny faktura. Estimeret værdi: ${beloeb}.`,
-    };
-  }
+    const timer = toNumber(order.timer);
+    const materialer = toNumber(order.materialer_beloeb);
+    const estimatedValue = timer * 550 + materialer;
 
-  return {
-    title: "Post bør kontrolleres",
-    explanation: `Denne post har en status, der indikerer, at der kan være et økonomisk problem.`,
-    action: `Gennemgå posten manuelt og vurder, om der skal faktureres eller følges op.`,
-  };
+    if (status.includes("afsluttet") && !hasInvoice) {
+      problems.push({
+        type: "opgave",
+        kunde,
+        projekt,
+        status: order.status || "afsluttet",
+        dato: order.dato,
+        amount: estimatedValue,
+        title: "Afsluttet opgave uden matchende faktura",
+        explanation: `Opgaven "${projekt}" hos ${kunde} er markeret som afsluttet i ordrestyringen, men der findes ingen matchende faktura i faktura-filen.`,
+        action:
+          "Tjek om opgaven allerede er faktureret under et andet navn. Hvis ikke, bør den gøres klar til fakturering eller markeres som ikke-fakturerbar.",
+      });
+    }
+
+    if (timer > 0 && !hasInvoice) {
+      problems.push({
+        type: "timer",
+        kunde,
+        projekt,
+        status: "timer uden matchende faktura",
+        dato: order.dato,
+        amount: timer * 550,
+        title: "Registrerede timer uden matchende faktura",
+        explanation: `Der er registreret ${timer} timer på "${projekt}" hos ${kunde}, men der findes ingen matchende faktura i faktura-filen.`,
+        action:
+          "Sammenlign timesedlerne med fakturaen. Hvis timerne ikke er medtaget, bør de kontrolleres før fakturering.",
+      });
+    }
+
+    if (materialer > 0 && !hasInvoice) {
+      problems.push({
+        type: "materialer",
+        kunde,
+        projekt,
+        status: "materialer uden matchende faktura",
+        dato: order.dato,
+        amount: materialer,
+        title: "Materialer uden matchende faktura",
+        explanation: `Der er registreret materialer for ${formatCurrency(
+          materialer
+        )} på "${projekt}" hos ${kunde}, men der findes ingen matchende faktura.`,
+        action:
+          "Sammenlign materialelisten med fakturaen. Hvis materialerne mangler, bør de tilføjes eller kontrolleres manuelt.",
+      });
+    }
+  });
+
+  invoiceRows.forEach((invoice) => {
+    const status = normalize(invoice.status);
+
+    if (status.includes("forfalden")) {
+      const kunde = invoice.kunde || "Ukendt kunde";
+      const projekt = invoice.projekt || "Ukendt projekt";
+
+      problems.push({
+        type: "faktura",
+        kunde,
+        projekt,
+        status: invoice.status || "forfalden",
+        dato: invoice.dato,
+        amount: toNumber(invoice.beloeb),
+        title: "Forfalden faktura kræver opfølgning",
+        explanation: `Fakturaen til ${kunde} på "${projekt}" er markeret som forfalden i faktura-filen.`,
+        action:
+          "Send betalingspåmindelse eller ring til kunden. Fakturaen bør følges op, indtil den er betalt eller afklaret.",
+      });
+    }
+  });
+
+  return problems;
 }
-export default function UploadPage() {
-  const [rows, setRows] = useState<CsvRow[]>([]);
-  const [fileName, setFileName] = useState("");
 
-  const problems = useMemo(() => rows.filter(isProblem), [rows]);
+export default function UploadPage() {
+  const [orderRows, setOrderRows] = useState<OrderRow[]>([]);
+  const [invoiceRows, setInvoiceRows] = useState<InvoiceRow[]>([]);
+  const [orderFileName, setOrderFileName] = useState("");
+  const [invoiceFileName, setInvoiceFileName] = useState("");
+
+  const hasBothFiles = orderRows.length > 0 && invoiceRows.length > 0;
+
+  const problems = useMemo(() => {
+    if (!hasBothFiles) return [];
+    return findProblems(orderRows, invoiceRows);
+ }, [orderRows, invoiceRows, hasBothFiles]);
 
   const totalValue = useMemo(() => {
-    return problems.reduce((sum, row) => {
-      const value = Number(String(row.beloeb || "0").replace(",", "."));
-      return sum + (Number.isNaN(value) ? 0 : value);
-    }, 0);
+    return problems.reduce((sum, problem) => sum + problem.amount, 0);
   }, [problems]);
 
-  async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleOrderUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-
     if (!file) return;
 
-    setFileName(file.name);
+    setOrderFileName(file.name);
 
     const text = await file.text();
-    const parsedRows = parseCsv(text);
+    const parsedRows = parseCsv<OrderRow>(text);
 
-    setRows(parsedRows);
+    setOrderRows(parsedRows);
+  }
+
+  async function handleInvoiceUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setInvoiceFileName(file.name);
+
+    const text = await file.text();
+    const parsedRows = parseCsv<InvoiceRow>(text);
+
+    setInvoiceRows(parsedRows);
   }
 
   return (
@@ -144,161 +244,200 @@ export default function UploadPage() {
           </Link>
 
           <p className="mt-6 text-sm font-semibold uppercase tracking-widest text-red-400">
-            CSV Upload
+            CSV Import
           </p>
 
           <h1 className="mt-2 text-4xl font-bold md:text-5xl">
-            Test FakturaTjek med en CSV-fil
+            Sammenlign ordrestyring med fakturaer
           </h1>
 
           <p className="mt-3 max-w-3xl text-slate-400">
-            Upload en simpel eksportfil. Systemet markerer rækker med status som
-            afsluttet, ikke faktureret eller forfalden.
+            Upload én CSV fra ordrestyring og én CSV fra fakturaprogrammet.
+            FakturaTjek sammenligner opgaver, timer og materialer med fakturaer
+            og viser, hvad der mangler opfølgning eller manuel kontrol.
           </p>
         </header>
 
-        <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-          <h2 className="text-2xl font-bold">Upload fil</h2>
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <UploadBox
+            title="1. Upload ordrestyring.csv"
+            description="Skal indeholde: opgave_id, kunde, projekt, status, timer, materialer_beloeb, dato."
+            fileName={orderFileName}
+            onChange={handleOrderUpload}
+          />
 
-          <p className="mt-2 text-sm text-slate-400">
-            Brug en CSV med kolonnerne: type, kunde, projekt, status, beloeb, dato.
-          </p>
-
-          <div className="mt-6">
-            <input
-              type="file"
-              accept=".csv"
-              onChange={handleFileUpload}
-              className="block w-full cursor-pointer rounded-xl border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300 file:mr-4 file:rounded-lg file:border-0 file:bg-red-500 file:px-4 file:py-2 file:font-semibold file:text-white hover:file:bg-red-600"
-            />
-          </div>
-
-          {fileName && (
-            <p className="mt-4 text-sm text-slate-400">
-              Valgt fil: <span className="text-white">{fileName}</span>
-            </p>
-          )}
+          <UploadBox
+            title="2. Upload fakturaer.csv"
+            description="Skal indeholde: faktura_id, kunde, projekt, status, beloeb, dato."
+            fileName={invoiceFileName}
+            onChange={handleInvoiceUpload}
+          />
         </section>
 
-        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <StatCard label="Rækker læst" value={rows.length.toString()} />
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
+          <StatCard label="Opgaver læst" value={orderRows.length.toString()} />
+          <StatCard label="Fakturaer læst" value={invoiceRows.length.toString()} />
           <StatCard label="Fundne problemer" value={problems.length.toString()} />
           <StatCard label="Potentiel værdi" value={formatCurrency(totalValue)} />
         </section>
 
         {problems.length > 0 && (
-  <section className="overflow-hidden rounded-2xl border border-red-500/30 bg-red-500/10">
-    <div className="border-b border-red-500/20 p-6">
-      <h2 className="text-2xl font-bold text-red-300">Fundne problemer</h2>
-      <p className="mt-1 text-sm text-red-200/80">
-        Disse rækker bør kontrolleres manuelt.
-      </p>
-    </div>
-
-    <div className="divide-y divide-red-500/20">
-      {problems.map((row, index) => {
-        const problem = getProblemExplanation(row);
-
-        return (
-          <div
-            key={index}
-            className="grid grid-cols-1 gap-4 p-6 md:grid-cols-12 md:items-start"
-          >
-            <div className="md:col-span-2">
-              <p className="font-semibold uppercase tracking-wide">
-              {row.type || "Ukendt"}
-              </p>
-              <p className="text-sm uppercase tracking-wide text-red-200/70">
-             {row.status}
-              </p>
-            </div>
-
-            <div className="md:col-span-3">
-              <p>{row.kunde || "Ingen kunde"}</p>
-              <p className="text-sm text-red-200/70">{row.projekt}</p>
-            </div>
-
-            <div className="md:col-span-5">
-              <p className="font-semibold text-red-100">{problem.title}</p>
+          <section className="overflow-hidden rounded-2xl border border-red-500/30 bg-red-500/10">
+            <div className="border-b border-red-500/20 p-6">
+              <h2 className="text-2xl font-bold text-red-300">
+                Fundne problemer
+              </h2>
               <p className="mt-1 text-sm text-red-200/80">
-                {problem.explanation}
-              </p>
-              <p className="mt-2 text-sm font-medium text-red-100">
-                Handling: {problem.action}
+                Disse poster bør kontrolleres manuelt.
               </p>
             </div>
 
-            <div className="md:col-span-1">
-              <p className="text-sm text-red-200/70">{row.dato}</p>
-            </div>
+            <div className="divide-y divide-red-500/20">
+              {problems.map((problem, index) => (
+                <div
+                  key={index}
+                  className="grid grid-cols-1 gap-4 p-6 md:grid-cols-12 md:items-start"
+                >
+                  <div className="md:col-span-2">
+                    <p className="font-semibold uppercase tracking-wide">
+                      {problem.type}
+                    </p>
+                    <p className="text-sm uppercase tracking-wide text-red-200/70">
+                      {problem.status}
+                    </p>
+                  </div>
 
-            <div className="font-bold md:col-span-1 md:text-right">
-              {formatCurrency(row.beloeb)}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  </section>
-)}
+                  <div className="md:col-span-3">
+                    <p>{problem.kunde}</p>
+                    <p className="text-sm text-red-200/70">
+                      {problem.projekt}
+                    </p>
+                  </div>
 
-        {rows.length > 0 && (
-          <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
-            <div className="border-b border-slate-800 p-6">
-              <h2 className="text-2xl font-bold">Alle rækker</h2>
-              <p className="mt-1 text-sm text-slate-400">
-                Rå data fra den uploadede CSV.
-              </p>
-            </div>
+                  <div className="md:col-span-5">
+                    <p className="font-semibold text-red-100">
+                      {problem.title}
+                    </p>
+                    <p className="mt-1 text-sm text-red-200/80">
+                      {problem.explanation}
+                    </p>
+                    <p className="mt-2 text-sm font-medium text-red-100">
+                      Handling: {problem.action}
+                    </p>
+                  </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-950 text-slate-400">
-                  <tr>
-                    <th className="p-4">Type</th>
-                    <th className="p-4">Kunde</th>
-                    <th className="p-4">Projekt</th>
-                    <th className="p-4">Status</th>
-                    <th className="p-4">Beløb</th>
-                    <th className="p-4">Dato</th>
-                  </tr>
-                </thead>
+                  <div className="md:col-span-1">
+                    <p className="text-sm text-red-200/70">{problem.dato}</p>
+                  </div>
 
-                <tbody className="divide-y divide-slate-800">
-                  {rows.map((row, index) => (
-                    <tr key={index}>
-                      <td className="p-4">{row.type}</td>
-                      <td className="p-4">{row.kunde}</td>
-                      <td className="p-4">{row.projekt}</td>
-                      <td className="p-4">{row.status}</td>
-                      <td className="p-4">{formatCurrency(row.beloeb)}</td>
-                      <td className="p-4">{row.dato}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                  <div className="font-bold md:col-span-1 md:text-right">
+                    {formatCurrency(problem.amount)}
+                  </div>
+                </div>
+              ))}
             </div>
           </section>
         )}
 
-        <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-          <h2 className="text-2xl font-bold">Testdata</h2>
+        {orderRows.length > 0 && (
+          <DataTable
+            title="Ordrestyring data"
+            description="Rå data fra ordrestyring CSV."
+            headers={[
+              "Opgave ID",
+              "Kunde",
+              "Projekt",
+              "Status",
+              "Timer",
+              "Materialer",
+              "Dato",
+            ]}
+            rows={orderRows.map((row) => [
+              row.opgave_id,
+              row.kunde,
+              row.projekt,
+              row.status,
+              row.timer,
+              formatCurrency(row.materialer_beloeb),
+              row.dato,
+            ])}
+          />
+        )}
 
-          <p className="mt-2 text-sm text-slate-400">
-            Kopiér dette ind i en fil kaldet <span className="text-white">test.csv</span> og upload den.
-          </p>
+        {invoiceRows.length > 0 && (
+          <DataTable
+            title="Faktura data"
+            description="Rå data fra faktura CSV."
+            headers={["Faktura ID", "Kunde", "Projekt", "Status", "Beløb", "Dato"]}
+            rows={invoiceRows.map((row) => [
+              row.faktura_id,
+              row.kunde,
+              row.projekt,
+              row.status,
+              formatCurrency(row.beloeb),
+              row.dato,
+            ])}
+          />
+        )}
 
-          <pre className="mt-4 overflow-x-auto rounded-xl bg-slate-950 p-4 text-sm text-slate-300">
-{`type,kunde,projekt,status,beloeb,dato
-opgave,Andersen Ejendomme,El-installation,afsluttet,38500,2026-06-01
-time,Fyns VVS Center,Tavlearbejde,ikke faktureret,18600,2026-06-02
-materiale,Nordic Bolig,Køkkeninstallation,ikke faktureret,17450,2026-06-03
-faktura,Munkebo Maskinservice,Serviceaftale,forfalden,24000,2026-05-01
-opgave,Larsen Byg,Ny eltavle,åben,28400,2026-06-04`}
-          </pre>
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <TestDataBox
+            title="Testdata: ordrestyring.csv"
+            fileName="ordrestyring.csv"
+            content={`opgave_id,kunde,projekt,status,timer,materialer_beloeb,dato
+1001,Andersen Ejendomme,El-installation,afsluttet,12,5200,2026-06-01
+1002,Fyns VVS Center,Tavlearbejde,afsluttet,31,0,2026-06-02
+1003,Nordic Bolig,Køkkeninstallation,afsluttet,0,7450,2026-06-03
+1004,Larsen Byg,Ny eltavle,åben,8,1200,2026-06-04
+1005,Munkebo Maskinservice,Tavlegennemgang,afsluttet,18,3100,2026-06-07`}
+          />
+
+          <TestDataBox
+            title="Testdata: fakturaer.csv"
+            fileName="fakturaer.csv"
+            content={`faktura_id,kunde,projekt,status,beloeb,dato
+F-1001,Andersen Ejendomme,El-installation,betalt,38500,2026-06-03
+F-1004,Larsen Byg,Ny eltavle,kladde,0,2026-06-04
+F-2001,Nordhavn Montage,Varmepumpe service,forfalden,14500,2026-05-28`}
+          />
         </section>
       </div>
     </main>
+  );
+}
+
+function UploadBox({
+  title,
+  description,
+  fileName,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  fileName: string;
+  onChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+}) {
+  return (
+    <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+      <h2 className="text-2xl font-bold">{title}</h2>
+
+      <p className="mt-2 text-sm text-slate-400">{description}</p>
+
+      <div className="mt-6">
+        <input
+          type="file"
+          accept=".csv"
+          onChange={onChange}
+          className="block w-full cursor-pointer rounded-xl border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300 file:mr-4 file:rounded-lg file:border-0 file:bg-red-500 file:px-4 file:py-2 file:font-semibold file:text-white hover:file:bg-red-600"
+        />
+      </div>
+
+      {fileName && (
+        <p className="mt-4 text-sm text-slate-400">
+          Valgt fil: <span className="text-white">{fileName}</span>
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -308,5 +447,77 @@ function StatCard({ label, value }: { label: string; value: string }) {
       <p className="text-sm text-slate-400">{label}</p>
       <p className="mt-2 text-3xl font-bold">{value}</p>
     </div>
+  );
+}
+
+function DataTable({
+  title,
+  description,
+  headers,
+  rows,
+}: {
+  title: string;
+  description: string;
+  headers: string[];
+  rows: (string | undefined)[][];
+}) {
+  return (
+    <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
+      <div className="border-b border-slate-800 p-6">
+        <h2 className="text-2xl font-bold">{title}</h2>
+        <p className="mt-1 text-sm text-slate-400">{description}</p>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-950 text-slate-400">
+            <tr>
+              {headers.map((header) => (
+                <th key={header} className="p-4">
+                  {header}
+                </th>
+              ))}
+            </tr>
+          </thead>
+
+          <tbody className="divide-y divide-slate-800">
+            {rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {row.map((cell, cellIndex) => (
+                  <td key={cellIndex} className="p-4">
+                    {cell || "-"}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function TestDataBox({
+  title,
+  fileName,
+  content,
+}: {
+  title: string;
+  fileName: string;
+  content: string;
+}) {
+  return (
+    <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+      <h2 className="text-2xl font-bold">{title}</h2>
+
+      <p className="mt-2 text-sm text-slate-400">
+        Kopiér dette ind i en fil kaldet{" "}
+        <span className="text-white">{fileName}</span> og upload den.
+      </p>
+
+      <pre className="mt-4 overflow-x-auto rounded-xl bg-slate-950 p-4 text-sm text-slate-300">
+        {content}
+      </pre>
+    </section>
   );
 }
