@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
+import type { RefObject } from "react";
+import * as XLSX from "xlsx";
 
 type RawRow = Record<string, string | undefined>;
 
@@ -33,6 +35,8 @@ type InvoiceRow = {
 
 type Problem = {
   type: "opgave" | "timer" | "materialer" | "faktura";
+  opgave_id?: string;
+  faktura_id?: string;
   kunde: string;
   projekt: string;
   status: string;
@@ -41,6 +45,24 @@ type Problem = {
   title: string;
   explanation: string;
   action: string;
+};
+
+type MatchCandidate = {
+  id: string;
+  orderIndex: number;
+  invoiceIndex: number;
+  confidence: "muligt" | "usikkert";
+  score: number;
+  reasons: string[];
+  order: OrderRow;
+  invoice: InvoiceRow;
+};
+
+type MatchDecision = Record<string, "yes" | "no" | undefined>;
+
+type ApprovedMatch = {
+  orderIndex: number;
+  invoiceIndex: number;
 };
 
 type OrderField =
@@ -72,6 +94,7 @@ type FieldConfig<T extends string> = {
 type Mapping<T extends string> = Record<T, string>;
 
 const HOURLY_RATE = 550;
+const AUTO_APPROVE_MATCH_SCORE = 0.92;
 
 const ORDER_FIELDS: FieldConfig<OrderField>[] = [
   {
@@ -384,13 +407,88 @@ function parseCsv(text: string): ParsedCsv {
   };
 }
 
+async function parseUploadedFile(file: File): Promise<ParsedCsv> {
+  const fileName = file.name.toLowerCase();
+
+  if (fileName.endsWith(".csv")) {
+    const text = await file.text();
+    return parseCsv(text);
+  }
+
+  if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
+    const data = await file.arrayBuffer();
+    const workbook = XLSX.read(data, {
+      type: "array",
+    });
+
+    const firstSheetName = workbook.SheetNames[0];
+
+    if (!firstSheetName) {
+      return {
+        headers: [],
+        rows: [],
+      };
+    }
+
+    const worksheet = workbook.Sheets[firstSheetName];
+
+    const sheetRows = XLSX.utils.sheet_to_json<string[]>(worksheet, {
+      header: 1,
+      defval: "",
+    });
+
+    const cleanedRows = sheetRows
+      .map((row) => row.map((cell) => String(cell).trim()))
+      .filter((row) => row.some((cell) => cell.length > 0));
+
+    if (cleanedRows.length < 2) {
+      return {
+        headers: [],
+        rows: [],
+      };
+    }
+
+    const headers = cleanedRows[0];
+
+    const rows = cleanedRows.slice(1).map((values) => {
+      const row: RawRow = {};
+
+      headers.forEach((header, index) => {
+        row[header] = values[index] ?? "";
+      });
+
+      return row;
+    });
+
+    return {
+      headers,
+      rows,
+    };
+  }
+
+  return {
+    headers: [],
+    rows: [],
+  };
+}
+
 function normalizeText(value: string | undefined) {
   return String(value || "")
     .toLowerCase()
     .trim()
+    .replace(/æ/g, "ae")
+    .replace(/ø/g, "oe")
+    .replace(/å/g, "aa")
     .replace(/_/g, " ")
     .replace(/-/g, " ")
-    .replace(/\s+/g, " ");
+    .replace(/\./g, "")
+    .replace(/\baps\b/g, "")
+    .replace(/\ba\/s\b/g, "")
+    .replace(/\bas\b/g, "")
+    .replace(/\bivs\b/g, "")
+    .replace(/\bab\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function formatHeaderLabel(header: string) {
@@ -410,6 +508,15 @@ function formatHeaderLabel(header: string) {
   };
 
   return labels[header] || header;
+}
+
+function isExactAliasMatch<T extends string>(
+  header: string,
+  field: FieldConfig<T>
+) {
+  const normalizedHeader = normalizeText(header);
+
+  return field.aliases.some((alias) => normalizeText(alias) === normalizedHeader);
 }
 
 function guessMapping<T extends string>(
@@ -464,18 +571,17 @@ function getMissingRequiredFields<T extends string>(
   return fields.filter((field) => field.required && !mapping[field.key]);
 }
 
-function getMappedFields<T extends string>(
+function getUncertainFields<T extends string>(
   fields: FieldConfig<T>[],
   mapping: Mapping<T>
 ) {
-  return fields.filter((field) => Boolean(mapping[field.key]));
-}
+  return fields.filter((field) => {
+    const selectedHeader = mapping[field.key];
 
-function getMissingOptionalFields<T extends string>(
-  fields: FieldConfig<T>[],
-  mapping: Mapping<T>
-) {
-  return fields.filter((field) => !field.required && !mapping[field.key]);
+    if (!selectedHeader) return false;
+
+    return !isExactAliasMatch(selectedHeader, field);
+  });
 }
 
 function hasRequiredMapping<T extends string>(
@@ -547,7 +653,208 @@ function isInvoiceUsable(invoice: InvoiceRow) {
   );
 }
 
-function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem[] {
+function getInvoiceNumbers(invoices: InvoiceRow[]) {
+  return invoices
+    .map((invoice) => invoice.faktura_id)
+    .filter(Boolean)
+    .join(", ");
+}
+
+function tokenize(value: string | undefined) {
+  return normalizeText(value)
+    .split(" ")
+    .map((word) => word.trim())
+    .filter((word) => word.length > 1);
+}
+
+function levenshteinDistance(a: string, b: string) {
+  const matrix = Array.from({ length: a.length + 1 }, () =>
+    new Array<number>(b.length + 1).fill(0)
+  );
+
+  for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
+  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+
+  return matrix[a.length][b.length];
+}
+
+function textSimilarity(a: string | undefined, b: string | undefined) {
+  const left = normalizeText(a);
+  const right = normalizeText(b);
+
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  if (left.includes(right) || right.includes(left)) return 0.92;
+
+  const leftTokens = tokenize(left);
+  const rightTokens = tokenize(right);
+
+  if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
+
+  const shared = leftTokens.filter((token) => rightTokens.includes(token));
+  const tokenScore = shared.length / Math.max(leftTokens.length, rightTokens.length);
+
+  const compactLeft = left.replace(/\s+/g, "");
+  const compactRight = right.replace(/\s+/g, "");
+  const editScore =
+    1 -
+    levenshteinDistance(compactLeft, compactRight) /
+      Math.max(compactLeft.length, compactRight.length);
+
+  return Math.max(tokenScore, editScore);
+}
+
+function dateDistanceScore(a?: string, b?: string) {
+  if (!a || !b) return 0;
+
+  const left = new Date(a);
+  const right = new Date(b);
+
+  if (Number.isNaN(left.getTime()) || Number.isNaN(right.getTime())) return 0;
+
+  const days = Math.abs(left.getTime() - right.getTime()) / (1000 * 60 * 60 * 24);
+
+  if (days <= 7) return 1;
+  if (days <= 30) return 0.65;
+  if (days <= 90) return 0.35;
+
+  return 0;
+}
+
+function getMatchCandidateScore(order: OrderRow, invoice: InvoiceRow) {
+  const customerScore = textSimilarity(order.kunde, invoice.kunde);
+  const projectScore = textSimilarity(order.projekt, invoice.projekt);
+  const dateScore = dateDistanceScore(order.dato, invoice.dato);
+
+  const score = customerScore * 0.42 + projectScore * 0.42 + dateScore * 0.16;
+  const reasons: string[] = [];
+
+  if (customerScore >= 0.55) reasons.push("kundenavnet ligner");
+  if (projectScore >= 0.45) reasons.push("projektet ligner");
+  if (dateScore >= 0.35) reasons.push("datoerne ligger tæt på hinanden");
+
+  return {
+    score,
+    customerScore,
+    projectScore,
+    dateScore,
+    reasons,
+  };
+}
+
+function findMatchCandidates(
+  orderRows: OrderRow[],
+  invoiceRows: InvoiceRow[]
+): MatchCandidate[] {
+  const candidates: MatchCandidate[] = [];
+  const usedInvoiceIndexes = new Set<number>();
+
+  orderRows.forEach((order, orderIndex) => {
+    const exactMatchExists = invoiceRows.some((invoice) => {
+      return (
+        getMatchKey(order.kunde, order.projekt) ===
+        getMatchKey(invoice.kunde, invoice.projekt)
+      );
+    });
+
+    if (exactMatchExists) return;
+
+    const possibleInvoices = invoiceRows
+      .map((invoice, invoiceIndex) => {
+        if (usedInvoiceIndexes.has(invoiceIndex)) return null;
+
+        const exactMatch =
+          getMatchKey(order.kunde, order.projekt) ===
+          getMatchKey(invoice.kunde, invoice.projekt);
+
+        if (exactMatch || !isInvoiceUsable(invoice)) {
+          return null;
+        }
+
+        const {
+          score,
+          customerScore,
+          projectScore,
+          dateScore,
+          reasons,
+        } = getMatchCandidateScore(order, invoice);
+
+        const shouldShow =
+          score >= 0.38 ||
+          customerScore >= 0.72 ||
+          projectScore >= 0.72 ||
+          (customerScore >= 0.52 && projectScore >= 0.35) ||
+          (customerScore >= 0.45 && projectScore >= 0.45 && dateScore >= 0.35);
+
+        if (!shouldShow) {
+          return null;
+        }
+
+        return {
+          id: `${orderIndex}-${invoiceIndex}`,
+          orderIndex,
+          invoiceIndex,
+          confidence: score >= 0.68 ? ("muligt" as const) : ("usikkert" as const),
+          score,
+          reasons:
+            reasons.length > 0
+              ? reasons
+              : ["der er delvist overlap mellem kunde, projekt eller dato"],
+          order,
+          invoice,
+        };
+      })
+      .filter(Boolean) as MatchCandidate[];
+
+    const bestCandidate = possibleInvoices.sort((a, b) => b.score - a.score)[0];
+
+    if (bestCandidate) {
+      candidates.push(bestCandidate);
+      usedInvoiceIndexes.add(bestCandidate.invoiceIndex);
+    }
+  });
+
+  return candidates;
+}
+
+function findMatchingOrderForInvoice(
+  invoiceIndex: number,
+  invoice: InvoiceRow,
+  orderRows: OrderRow[],
+  approvedMatches: ApprovedMatch[]
+) {
+  const exactOrder = orderRows.find((order) => {
+    return getMatchKey(order.kunde, order.projekt) === getMatchKey(invoice.kunde, invoice.projekt);
+  });
+
+  if (exactOrder) return exactOrder;
+
+  const approvedMatch = approvedMatches.find((match) => {
+    return match.invoiceIndex === invoiceIndex;
+  });
+
+  if (!approvedMatch) return undefined;
+
+  return orderRows[approvedMatch.orderIndex];
+}
+
+function findProblems(
+  orderRows: OrderRow[],
+  invoiceRows: InvoiceRow[],
+  approvedMatches: ApprovedMatch[]
+): Problem[] {
   const problems: Problem[] = [];
   const invoiceMap = new Map<string, InvoiceRow[]>();
 
@@ -558,7 +865,7 @@ function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem
     invoiceMap.set(key, existing);
   });
 
-  orderRows.forEach((order) => {
+  orderRows.forEach((order, orderIndex) => {
     const kunde = order.kunde || "Ukendt kunde";
     const projekt = order.projekt || "Ukendt projekt";
     const status = normalizeText(order.status);
@@ -566,7 +873,19 @@ function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem
     const shouldCheckOrder = hasStatus ? status.includes("afsluttet") : true;
     const key = getMatchKey(order.kunde, order.projekt);
 
-    const matchingInvoices = (invoiceMap.get(key) || []).filter(isInvoiceUsable);
+    const exactInvoices = (invoiceMap.get(key) || []).filter(isInvoiceUsable);
+
+    const approvedInvoices = approvedMatches
+      .filter((match) => match.orderIndex === orderIndex)
+      .map((match) => invoiceRows[match.invoiceIndex])
+      .filter(Boolean)
+      .filter(isInvoiceUsable);
+
+    const matchingInvoices = [...exactInvoices, ...approvedInvoices].filter(
+      (invoice, index, list) => list.indexOf(invoice) === index
+    );
+
+    const invoiceNumbers = getInvoiceNumbers(matchingInvoices);
 
     const registeredHours = toNumber(order.timer);
     const invoicedHours = matchingInvoices.reduce(
@@ -587,6 +906,8 @@ function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem
 
       problems.push({
         type: "opgave",
+        opgave_id: order.opgave_id,
+        faktura_id: "",
         kunde,
         projekt,
         status: hasStatus ? order.status || "afsluttet" : "status mangler",
@@ -611,6 +932,8 @@ function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem
 
       problems.push({
         type: "timer",
+        opgave_id: order.opgave_id,
+        faktura_id: invoiceNumbers,
         kunde,
         projekt,
         status: "timer mangler på faktura",
@@ -627,6 +950,8 @@ function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem
 
       problems.push({
         type: "materialer",
+        opgave_id: order.opgave_id,
+        faktura_id: invoiceNumbers,
         kunde,
         projekt,
         status: "materialer mangler på faktura",
@@ -645,15 +970,23 @@ function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem
     }
   });
 
-  invoiceRows.forEach((invoice) => {
+  invoiceRows.forEach((invoice, invoiceIndex) => {
     const status = normalizeText(invoice.status);
 
     if (status.includes("forfalden")) {
       const kunde = invoice.kunde || "Ukendt kunde";
       const projekt = invoice.projekt || "Ukendt projekt";
+      const matchingOrder = findMatchingOrderForInvoice(
+        invoiceIndex,
+        invoice,
+        orderRows,
+        approvedMatches
+      );
 
       problems.push({
         type: "faktura",
+        opgave_id: matchingOrder?.opgave_id,
+        faktura_id: invoice.faktura_id,
         kunde,
         projekt,
         status: invoice.status || "forfalden",
@@ -672,6 +1005,7 @@ function findProblems(orderRows: OrderRow[], invoiceRows: InvoiceRow[]): Problem
 
 export default function UploadPage() {
   const analysisRef = useRef<HTMLDivElement | null>(null);
+  const matchReviewRef = useRef<HTMLDivElement | null>(null);
 
   const [orderFile, setOrderFile] = useState<ParsedCsv>({
     headers: [],
@@ -694,8 +1028,12 @@ export default function UploadPage() {
   const [orderFileName, setOrderFileName] = useState("");
   const [invoiceFileName, setInvoiceFileName] = useState("");
   const [hasAnalyzed, setHasAnalyzed] = useState(false);
-  const [showAllOrderMapping, setShowAllOrderMapping] = useState(false);
-  const [showAllInvoiceMapping, setShowAllInvoiceMapping] = useState(false);
+  const [isReviewingMatches, setIsReviewingMatches] = useState(false);
+  const [matchCandidates, setMatchCandidates] = useState<MatchCandidate[]>([]);
+  const [autoApprovedMatches, setAutoApprovedMatches] = useState<ApprovedMatch[]>([]);
+  const [matchDecisions, setMatchDecisions] = useState<MatchDecision>({});
+  const [showOrderMapping, setShowOrderMapping] = useState(false);
+  const [showInvoiceMapping, setShowInvoiceMapping] = useState(false);
 
   const missingOrderRequiredFields = getMissingRequiredFields(
     ORDER_FIELDS,
@@ -706,6 +1044,18 @@ export default function UploadPage() {
     INVOICE_FIELDS,
     invoiceMapping
   );
+
+  const uncertainOrderFields = getUncertainFields(ORDER_FIELDS, orderMapping);
+  const uncertainInvoiceFields = getUncertainFields(INVOICE_FIELDS, invoiceMapping);
+
+  const orderNeedsReview =
+    orderFile.headers.length > 0 &&
+    (missingOrderRequiredFields.length > 0 || uncertainOrderFields.length > 0);
+
+  const invoiceNeedsReview =
+    invoiceFile.headers.length > 0 &&
+    (missingInvoiceRequiredFields.length > 0 ||
+      uncertainInvoiceFields.length > 0);
 
   const orderMappingReady = hasRequiredMapping(ORDER_FIELDS, orderMapping);
   const invoiceMappingReady = hasRequiredMapping(INVOICE_FIELDS, invoiceMapping);
@@ -723,10 +1073,35 @@ export default function UploadPage() {
   const hasBothFiles = orderFile.rows.length > 0 && invoiceFile.rows.length > 0;
   const canAnalyze = hasBothFiles && orderMappingReady && invoiceMappingReady;
 
+  const allMatchCandidatesAnswered =
+    matchCandidates.length > 0 &&
+    matchCandidates.every((candidate) => Boolean(matchDecisions[candidate.id]));
+
+  const manuallyApprovedMatches = useMemo(() => {
+    return matchCandidates
+      .filter((candidate) => matchDecisions[candidate.id] === "yes")
+      .map((candidate) => ({
+        orderIndex: candidate.orderIndex,
+        invoiceIndex: candidate.invoiceIndex,
+      }));
+  }, [matchCandidates, matchDecisions]);
+
+  const approvedMatches = useMemo(() => {
+    return [...autoApprovedMatches, ...manuallyApprovedMatches].filter(
+      (match, index, list) =>
+        index ===
+        list.findIndex(
+          (item) =>
+            item.orderIndex === match.orderIndex &&
+            item.invoiceIndex === match.invoiceIndex
+        )
+    );
+  }, [autoApprovedMatches, manuallyApprovedMatches]);
+
   const problems = useMemo(() => {
     if (!hasAnalyzed || !canAnalyze) return [];
-    return findProblems(orderRows, invoiceRows);
-  }, [orderRows, invoiceRows, canAnalyze, hasAnalyzed]);
+    return findProblems(orderRows, invoiceRows, approvedMatches);
+  }, [orderRows, invoiceRows, canAnalyze, hasAnalyzed, approvedMatches]);
 
   const totalValue = useMemo(() => {
     return problems.reduce((sum, problem) => sum + problem.amount, 0);
@@ -737,11 +1112,14 @@ export default function UploadPage() {
     if (!file) return;
 
     setHasAnalyzed(false);
-    setShowAllOrderMapping(false);
+    setIsReviewingMatches(false);
+    setMatchCandidates([]);
+    setAutoApprovedMatches([]);
+    setMatchDecisions({});
+    setShowOrderMapping(false);
     setOrderFileName(file.name);
 
-    const text = await file.text();
-    const parsed = parseCsv(text);
+    const parsed = await parseUploadedFile(file);
 
     setOrderFile(parsed);
     setOrderMapping(guessMapping(parsed.headers, ORDER_FIELDS));
@@ -752,11 +1130,14 @@ export default function UploadPage() {
     if (!file) return;
 
     setHasAnalyzed(false);
-    setShowAllInvoiceMapping(false);
+    setIsReviewingMatches(false);
+    setMatchCandidates([]);
+    setAutoApprovedMatches([]);
+    setMatchDecisions({});
+    setShowInvoiceMapping(false);
     setInvoiceFileName(file.name);
 
-    const text = await file.text();
-    const parsed = parseCsv(text);
+    const parsed = await parseUploadedFile(file);
 
     setInvoiceFile(parsed);
     setInvoiceMapping(guessMapping(parsed.headers, INVOICE_FIELDS));
@@ -764,6 +1145,10 @@ export default function UploadPage() {
 
   function updateOrderMapping(field: OrderField, value: string) {
     setHasAnalyzed(false);
+    setIsReviewingMatches(false);
+    setMatchCandidates([]);
+    setAutoApprovedMatches([]);
+    setMatchDecisions({});
     setOrderMapping((current) => ({
       ...current,
       [field]: value,
@@ -772,6 +1157,10 @@ export default function UploadPage() {
 
   function updateInvoiceMapping(field: InvoiceField, value: string) {
     setHasAnalyzed(false);
+    setIsReviewingMatches(false);
+    setMatchCandidates([]);
+    setAutoApprovedMatches([]);
+    setMatchDecisions({});
     setInvoiceMapping((current) => ({
       ...current,
       [field]: value,
@@ -779,6 +1168,57 @@ export default function UploadPage() {
   }
 
   function handleAnalyze() {
+    const candidates = findMatchCandidates(orderRows, invoiceRows);
+
+    const automaticMatches = candidates
+      .filter((candidate) => candidate.score >= AUTO_APPROVE_MATCH_SCORE)
+      .map((candidate) => ({
+        orderIndex: candidate.orderIndex,
+        invoiceIndex: candidate.invoiceIndex,
+      }));
+
+    const candidatesToReview = candidates.filter(
+      (candidate) => candidate.score < AUTO_APPROVE_MATCH_SCORE
+    );
+
+    setAutoApprovedMatches(automaticMatches);
+    setMatchCandidates(candidatesToReview);
+    setMatchDecisions({});
+    setHasAnalyzed(false);
+
+    if (candidatesToReview.length > 0) {
+      setIsReviewingMatches(true);
+
+      window.setTimeout(() => {
+        matchReviewRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 100);
+
+      return;
+    }
+
+    setIsReviewingMatches(false);
+    setHasAnalyzed(true);
+
+    window.setTimeout(() => {
+      analysisRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 100);
+  }
+
+  function updateMatchDecision(candidateId: string, decision: "yes" | "no") {
+    setMatchDecisions((current) => ({
+      ...current,
+      [candidateId]: decision,
+    }));
+  }
+
+  function finishMatchReview() {
+    setIsReviewingMatches(false);
     setHasAnalyzed(true);
 
     window.setTimeout(() => {
@@ -806,9 +1246,10 @@ export default function UploadPage() {
           </h1>
 
           <p className="mt-3 max-w-3xl text-slate-400">
-            Upload én fil fra ordrestyring og én fil fra fakturaprogrammet.
-            FakturaTjek finder automatisk de relevante kolonner. Hvis noget
-            mangler, bliver du kun bedt om at vælge de manglende kolonner.
+            Upload én CSV- eller Excel-fil fra ordrestyring og én CSV- eller
+            Excel-fil fra fakturaprogrammet. FakturaTjek finder automatisk de
+            relevante kolonner. Hvis noget mangler eller virker usikkert, bliver
+            du bedt om at kontrollere det.
           </p>
         </header>
 
@@ -828,40 +1269,43 @@ export default function UploadPage() {
           />
         </section>
 
-        {!hasAnalyzed && orderFile.headers.length > 0 && (
-          <AutoMappingStatus
-            title="Ordrestyring"
-            fields={ORDER_FIELDS}
-            mapping={orderMapping}
-            onEditAll={() => setShowAllOrderMapping(true)}
+        {!hasAnalyzed && !isReviewingMatches && orderNeedsReview && !showOrderMapping && (
+          <ReviewNotice
+            title="Kontrollér felter fra ordrestyring"
+            missingFields={missingOrderRequiredFields}
+            uncertainFields={uncertainOrderFields}
+            onEdit={() => setShowOrderMapping(true)}
           />
         )}
 
-        {!hasAnalyzed && invoiceFile.headers.length > 0 && (
-          <AutoMappingStatus
-            title="Fakturaprogram"
-            fields={INVOICE_FIELDS}
-            mapping={invoiceMapping}
-            onEditAll={() => setShowAllInvoiceMapping(true)}
+        {!hasAnalyzed && !isReviewingMatches && invoiceNeedsReview && !showInvoiceMapping && (
+          <ReviewNotice
+            title="Kontrollér felter fra fakturaprogram"
+            missingFields={missingInvoiceRequiredFields}
+            uncertainFields={uncertainInvoiceFields}
+            onEdit={() => setShowInvoiceMapping(true)}
           />
         )}
 
         {!hasAnalyzed &&
+          !isReviewingMatches &&
           orderFile.headers.length > 0 &&
-          (showAllOrderMapping || missingOrderRequiredFields.length > 0) && (
+          (showOrderMapping || missingOrderRequiredFields.length > 0) && (
             <MappingBox
               title={
-                showAllOrderMapping
-                  ? "Ret kolonner fra ordrestyring"
-                  : "Vælg manglende kolonner fra ordrestyring"
+                missingOrderRequiredFields.length > 0 && !showOrderMapping
+                  ? "Vælg manglende felter fra ordrestyring"
+                  : "Ret felter fra ordrestyring"
               }
               description={
-                showAllOrderMapping
-                  ? "Her kan du rette alle kolonner, hvis FakturaTjek har gættet forkert."
-                  : "FakturaTjek kunne ikke finde disse nødvendige kolonner automatisk."
+                missingOrderRequiredFields.length > 0 && !showOrderMapping
+                  ? "FakturaTjek kunne ikke finde disse nødvendige felter automatisk."
+                  : "Ret kun noget, hvis FakturaTjek har valgt et forkert felt."
               }
               fields={
-                showAllOrderMapping ? ORDER_FIELDS : missingOrderRequiredFields
+                missingOrderRequiredFields.length > 0 && !showOrderMapping
+                  ? missingOrderRequiredFields
+                  : ORDER_FIELDS
               }
               headers={orderFile.headers}
               mapping={orderMapping}
@@ -870,23 +1314,24 @@ export default function UploadPage() {
           )}
 
         {!hasAnalyzed &&
+          !isReviewingMatches &&
           invoiceFile.headers.length > 0 &&
-          (showAllInvoiceMapping || missingInvoiceRequiredFields.length > 0) && (
+          (showInvoiceMapping || missingInvoiceRequiredFields.length > 0) && (
             <MappingBox
               title={
-                showAllInvoiceMapping
-                  ? "Ret kolonner fra fakturaprogram"
-                  : "Vælg manglende kolonner fra fakturaprogram"
+                missingInvoiceRequiredFields.length > 0 && !showInvoiceMapping
+                  ? "Vælg manglende felter fra fakturaprogram"
+                  : "Ret felter fra fakturaprogram"
               }
               description={
-                showAllInvoiceMapping
-                  ? "Her kan du rette alle kolonner, hvis FakturaTjek har gættet forkert."
-                  : "FakturaTjek kunne ikke finde disse nødvendige kolonner automatisk."
+                missingInvoiceRequiredFields.length > 0 && !showInvoiceMapping
+                  ? "FakturaTjek kunne ikke finde disse nødvendige felter automatisk."
+                  : "Ret kun noget, hvis FakturaTjek har valgt et forkert felt."
               }
               fields={
-                showAllInvoiceMapping
-                  ? INVOICE_FIELDS
-                  : missingInvoiceRequiredFields
+                missingInvoiceRequiredFields.length > 0 && !showInvoiceMapping
+                  ? missingInvoiceRequiredFields
+                  : INVOICE_FIELDS
               }
               headers={invoiceFile.headers}
               mapping={invoiceMapping}
@@ -894,27 +1339,35 @@ export default function UploadPage() {
             />
           )}
 
-        {!hasAnalyzed && hasBothFiles && (
+        {!hasAnalyzed && !isReviewingMatches && hasBothFiles && (
           <section className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6">
             <div className="max-w-3xl">
               <h2 className="text-2xl font-bold text-red-200">
                 Klar til analyse
               </h2>
               <p className="mt-2 text-sm text-red-200/80">
-                FakturaTjek har fundet de nødvendige kolonner, hvis knappen er
-                aktiv. Tryk på Analyser data for at skjule kolonne-kontrollen og
-                se resultaterne.
+                Når knappen er aktiv, har FakturaTjek nok data til at sammenligne
+                opgaver og fakturaer.
               </p>
             </div>
 
-            <button
-              type="button"
-              disabled={!canAnalyze}
-              onClick={handleAnalyze}
-              className="mt-6 rounded-xl bg-red-500 px-6 py-4 font-semibold text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-            >
-              Analyser data
-            </button>
+            <div className="mt-6 flex flex-col gap-4 sm:flex-row">
+              <button
+                type="button"
+                disabled={!canAnalyze}
+                onClick={handleAnalyze}
+                className="rounded-xl bg-red-500 px-6 py-4 font-semibold text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              >
+                Analyser data
+              </button>
+
+              <a
+                href="mailto:kontakt@fakturatjek.net"
+                className="rounded-xl border border-slate-700 px-6 py-4 text-center font-semibold text-white hover:bg-slate-900"
+              >
+                Book gennemgang
+              </a>
+            </div>
 
             {!canAnalyze && (
               <p className="mt-3 text-sm text-yellow-200">
@@ -926,6 +1379,7 @@ export default function UploadPage() {
         )}
 
         {!hasBothFiles &&
+          !isReviewingMatches &&
           (orderFile.rows.length > 0 || invoiceFile.rows.length > 0) && (
             <section className="rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-6">
               <h2 className="text-xl font-bold text-yellow-200">
@@ -938,6 +1392,17 @@ export default function UploadPage() {
               </p>
             </section>
           )}
+
+        {isReviewingMatches && matchCandidates.length > 0 && (
+          <MatchReviewSection
+            refElement={matchReviewRef}
+            candidates={matchCandidates}
+            decisions={matchDecisions}
+            onDecision={updateMatchDecision}
+            onContinue={finishMatchReview}
+            canContinue={allMatchCandidatesAnswered}
+          />
+        )}
 
         {hasAnalyzed && (
           <section
@@ -972,6 +1437,8 @@ export default function UploadPage() {
         {hasAnalyzed && problems.length > 0 && (
           <ProblemResults problems={problems} totalValue={totalValue} />
         )}
+
+        {hasAnalyzed && <AnalysisHelpBox />}
 
         {hasAnalyzed && orderRows.length > 0 && (
           <DataTable
@@ -1079,7 +1546,7 @@ function UploadBox({
       <div className="mt-6">
         <input
           type="file"
-          accept=".csv"
+          accept=".csv,.xlsx,.xls"
           onChange={onChange}
           className="block w-full cursor-pointer rounded-xl border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300 file:mr-4 file:rounded-lg file:border-0 file:bg-red-500 file:px-4 file:py-2 file:font-semibold file:text-white hover:file:bg-red-600"
         />
@@ -1094,88 +1561,39 @@ function UploadBox({
   );
 }
 
-function AutoMappingStatus<T extends string>({
+function ReviewNotice<T extends string>({
   title,
-  fields,
-  mapping,
-  onEditAll,
+  missingFields,
+  uncertainFields,
+  onEdit,
 }: {
   title: string;
-  fields: FieldConfig<T>[];
-  mapping: Mapping<T>;
-  onEditAll: () => void;
+  missingFields: FieldConfig<T>[];
+  uncertainFields: FieldConfig<T>[];
+  onEdit: () => void;
 }) {
-  const mappedFields = getMappedFields(fields, mapping);
-  const missingRequiredFields = getMissingRequiredFields(fields, mapping);
-  const missingOptionalFields = getMissingOptionalFields(fields, mapping);
-
   return (
-    <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+    <section className="rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-6">
+      <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
         <div>
-          <p className="text-sm font-semibold uppercase tracking-widest text-red-400">
-            {title}
-          </p>
+          <h2 className="text-2xl font-bold text-yellow-100">{title}</h2>
 
-          <h2 className="mt-2 text-2xl font-bold">
-            FakturaTjek har genkendt felterne
-          </h2>
+          {missingFields.length > 0 && (
+            <p className="mt-2 text-sm text-yellow-100/80">
+              Nogle nødvendige felter blev ikke fundet automatisk og skal vælges
+              manuelt.
+            </p>
+          )}
 
-          <p className="mt-2 max-w-3xl text-sm text-slate-400">
-            Vi har automatisk fundet de felter, der skal bruges til analysen.
-            Du behøver kun rette noget, hvis det ser forkert ud.
-          </p>
-        </div>
+          {missingFields.length === 0 && uncertainFields.length > 0 && (
+            <p className="mt-2 text-sm text-yellow-100/80">
+              FakturaTjek har fundet et muligt match, men nogle felter bør
+              kontrolleres.
+            </p>
+          )}
 
-        <button
-          type="button"
-          onClick={onEditAll}
-          className="rounded-xl border border-red-500/40 bg-red-500/10 px-5 py-3 text-sm font-semibold text-red-200 hover:bg-red-500/20"
-        >
-          Ret felter
-        </button>
-      </div>
-
-      {mappedFields.length > 0 && (
-        <div className="mt-6 rounded-2xl border border-green-500/20 bg-green-500/10 p-5">
-          <div className="flex items-center gap-2">
-            <span className="text-xl">✓</span>
-            <h3 className="font-bold text-green-200">Fundet automatisk</h3>
-          </div>
-
-          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-            {mappedFields.map((field) => (
-              <div
-                key={field.key}
-                className="rounded-xl border border-green-500/20 bg-slate-950/40 p-4"
-              >
-                <p className="text-xs uppercase tracking-wide text-green-200/70">
-                  {field.label}
-                </p>
-                <p className="mt-1 font-semibold text-green-100">
-                  {formatHeaderLabel(mapping[field.key])}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {missingRequiredFields.length > 0 && (
-        <div className="mt-5 rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-5">
-          <div className="flex items-center gap-2">
-            <span className="text-xl">!</span>
-            <h3 className="font-bold text-yellow-200">
-              Vi mangler nogle felter
-            </h3>
-          </div>
-
-          <p className="mt-2 text-sm text-yellow-100/80">
-            Vælg disse felter manuelt, før analysen kan køre:
-          </p>
-
-          <div className="mt-3 flex flex-wrap gap-2">
-            {missingRequiredFields.map((field) => (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {[...missingFields, ...uncertainFields].map((field) => (
               <span
                 key={field.key}
                 className="rounded-full border border-yellow-500/30 bg-yellow-500/10 px-3 py-1 text-sm text-yellow-100"
@@ -1185,31 +1603,209 @@ function AutoMappingStatus<T extends string>({
             ))}
           </div>
         </div>
-      )}
 
-      {missingOptionalFields.length > 0 && (
-        <div className="mt-5 rounded-2xl border border-slate-700 bg-slate-950 p-5">
-          <h3 className="font-bold text-slate-200">
-            Ikke alle ekstra felter blev fundet
-          </h3>
+        <button
+          type="button"
+          onClick={onEdit}
+          className="rounded-xl border border-yellow-500/40 bg-yellow-500/10 px-5 py-3 text-sm font-semibold text-yellow-100 hover:bg-yellow-500/20"
+        >
+          Ret felter
+        </button>
+      </div>
+    </section>
+  );
+}
 
-          <p className="mt-2 text-sm text-slate-400">
-            Det er ikke nødvendigvis et problem. Analysen kan stadig køre, men
-            bliver mere præcis, hvis disse felter også findes:
+function MatchReviewSection({
+  refElement,
+  candidates,
+  decisions,
+  onDecision,
+  onContinue,
+  canContinue,
+}: {
+  refElement: RefObject<HTMLDivElement | null>;
+  candidates: MatchCandidate[];
+  decisions: MatchDecision;
+  onDecision: (candidateId: string, decision: "yes" | "no") => void;
+  onContinue: () => void;
+  canContinue: boolean;
+}) {
+  const answeredCount = candidates.filter((candidate) =>
+    Boolean(decisions[candidate.id])
+  ).length;
+
+  return (
+    <section
+      ref={refElement}
+      className="scroll-mt-8 overflow-hidden rounded-3xl border border-yellow-500/30 bg-yellow-500/10"
+    >
+      <div className="border-b border-yellow-500/20 p-6 md:p-8">
+        <p className="text-sm font-semibold uppercase tracking-[0.25em] text-yellow-300">
+          Match-kontrol
+        </p>
+
+        <h2 className="mt-3 text-3xl font-bold text-yellow-50">
+          Kontrollér mulige matches
+        </h2>
+
+        <p className="mt-3 max-w-4xl text-sm leading-6 text-yellow-100/75">
+          FakturaTjek har fundet opgaver og fakturaer, der ligner hinanden, men
+          ikke matcher helt sikkert. Vælg om de hører sammen, før analysen laves.
+        </p>
+
+        <p className="mt-4 text-sm text-yellow-100/70">
+          Besvaret: {answeredCount} af {candidates.length}
+        </p>
+      </div>
+
+      <div className="space-y-4 p-4 md:p-6">
+        {candidates.map((candidate) => {
+          const decision = decisions[candidate.id];
+
+          return (
+            <article
+              key={candidate.id}
+              className="rounded-2xl border border-slate-700 bg-slate-950/60 p-5"
+            >
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+                <div className="lg:col-span-3">
+                  <p className="text-xs uppercase tracking-widest text-slate-400">
+                    Opgave
+                  </p>
+
+                  <p className="mt-3 text-xl font-bold text-white">
+                    {candidate.order.kunde || "Ukendt kunde"}
+                  </p>
+
+                  <p className="mt-2 text-sm text-slate-300">
+                    {candidate.order.projekt || "Ukendt projekt"}
+                  </p>
+
+                  <div className="mt-4 space-y-1 text-sm text-slate-400">
+                    <p>Opgave ID: {candidate.order.opgave_id || "-"}</p>
+                    <p>Dato: {candidate.order.dato || "-"}</p>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-3">
+                  <p className="text-xs uppercase tracking-widest text-slate-400">
+                    Mulig faktura
+                  </p>
+
+                  <p className="mt-3 text-xl font-bold text-white">
+                    {candidate.invoice.kunde || "Ukendt kunde"}
+                  </p>
+
+                  <p className="mt-2 text-sm text-slate-300">
+                    {candidate.invoice.projekt || "Ukendt projekt"}
+                  </p>
+
+                  <div className="mt-4 space-y-1 text-sm text-slate-400">
+                    <p>Faktura ID: {candidate.invoice.faktura_id || "-"}</p>
+                    <p>Dato: {candidate.invoice.dato || "-"}</p>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-3">
+                  <p className="text-xs uppercase tracking-widest text-slate-400">
+                    Vurdering
+                  </p>
+
+                  <div className="mt-3 inline-flex rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-yellow-100">
+                    {candidate.confidence === "muligt"
+                      ? "Muligt match"
+                      : "Usikkert match"}
+                  </div>
+
+                  <p className="mt-4 text-sm leading-6 text-slate-300">
+                    Match-score: {Math.round(candidate.score * 100)}%
+                  </p>
+
+                  {candidate.reasons.length > 0 && (
+                    <p className="mt-2 text-sm leading-6 text-slate-400">
+                      Fordi {candidate.reasons.join(", ")}.
+                    </p>
+                  )}
+                </div>
+
+                <div className="lg:col-span-3">
+                  <p className="text-xs uppercase tracking-widest text-slate-400">
+                    Hører de sammen?
+                  </p>
+
+                  <div className="mt-4 flex flex-col gap-3">
+                    <button
+                      type="button"
+                      onClick={() => onDecision(candidate.id, "yes")}
+                      className={
+                        decision === "yes"
+                          ? "rounded-xl bg-green-500 px-4 py-3 font-semibold text-white"
+                          : "rounded-xl border border-green-500/40 bg-green-500/10 px-4 py-3 font-semibold text-green-100 hover:bg-green-500/20"
+                      }
+                    >
+                      Ja, de hører sammen
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onDecision(candidate.id, "no")}
+                      className={
+                        decision === "no"
+                          ? "rounded-xl bg-red-500 px-4 py-3 font-semibold text-white"
+                          : "rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 font-semibold text-red-100 hover:bg-red-500/20"
+                      }
+                    >
+                      Nej, de hører ikke sammen
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </article>
+          );
+        })}
+
+        <div className="flex flex-col gap-3 pt-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-yellow-100/70">
+            Matches med meget høj score er allerede godkendt automatisk. Her skal
+            kun de mere usikre matches bekræftes.
           </p>
 
-          <div className="mt-3 flex flex-wrap gap-2">
-            {missingOptionalFields.map((field) => (
-              <span
-                key={field.key}
-                className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-300"
-              >
-                {field.label}
-              </span>
-            ))}
-          </div>
+          <button
+            type="button"
+            disabled={!canContinue}
+            onClick={onContinue}
+            className="rounded-xl bg-red-500 px-6 py-4 font-semibold text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+          >
+            Lav Fundne problemer
+          </button>
         </div>
-      )}
+      </div>
+    </section>
+  );
+}
+
+function AnalysisHelpBox() {
+  return (
+    <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+      <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
+        <div className="max-w-3xl">
+          <h2 className="text-2xl font-bold">Vil du høre mere om FakturaTjek?</h2>
+
+          <p className="mt-2 text-sm leading-6 text-slate-400">
+            Få en kort gennemgang af, hvordan FakturaTjek kan give bedre
+            overblik, spare tid og hjælpe med at opdage værdi, der ellers kan
+            blive overset.
+          </p>
+        </div>
+
+        <a
+          href="mailto:kontakt@fakturatjek.net"
+          className="rounded-xl bg-red-500 px-6 py-4 text-center font-semibold text-white hover:bg-red-600"
+        >
+          Book gennemgang
+        </a>
+      </div>
     </section>
   );
 }
@@ -1279,6 +1875,12 @@ function ProblemCard({
   index: number;
 }) {
   const meta = getProblemMeta(problem.type);
+  const invoiceNumber =
+    problem.faktura_id && problem.faktura_id.trim().length > 0
+      ? problem.faktura_id
+      : problem.type === "opgave"
+        ? "Ikke fundet"
+        : "-";
 
   return (
     <article className="rounded-xl border border-slate-700/70 bg-slate-900/75 p-5">
@@ -1308,9 +1910,19 @@ function ProblemCard({
 
           <p className="mt-2 text-sm text-slate-300">{problem.projekt}</p>
 
-          {problem.dato && (
-            <p className="mt-5 text-sm text-slate-400">Dato: {problem.dato}</p>
-          )}
+          <div className="mt-5 space-y-1 text-sm text-slate-400">
+            <p>
+              Opgave ID.:{" "}
+              <span className="text-slate-200">{problem.opgave_id || "-"}</span>
+            </p>
+
+            <p>
+              Faktura ID.:{" "}
+              <span className="text-slate-200">{invoiceNumber}</span>
+            </p>
+
+            {problem.dato && <p>Dato: {problem.dato}</p>}
+          </div>
         </div>
 
         <div className="lg:col-span-5">

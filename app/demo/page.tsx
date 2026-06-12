@@ -473,7 +473,7 @@ export default function DemoPage() {
             href="/upload"
             className="rounded-2xl bg-red-500 p-6 font-semibold text-white hover:bg-red-600"
           >
-            Prøv selv med CSV-import →
+            Prøv selv upload og analyse →
           </Link>
 
           <a

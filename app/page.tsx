@@ -31,7 +31,7 @@ export default function Home() {
               href="/upload"
               className="rounded-xl border border-red-500/40 bg-red-500/10 px-6 py-4 text-center font-semibold text-red-200 hover:bg-red-500/20"
             >
-              Prøv CSV-upload
+              Prøv selv upload og analyse
             </Link>
 
             <a
@@ -47,7 +47,8 @@ export default function Home() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
             <h2 className="text-xl font-bold">Afsluttede opgaver</h2>
             <p className="mt-3 text-slate-400">
-              Finder opgaver der er markeret færdige, men ikke matcher en faktura.
+              Finder opgaver der er markeret færdige, men ikke matcher en
+              faktura.
             </p>
           </div>
 
@@ -77,8 +78,8 @@ export default function Home() {
             </h2>
 
             <p className="mt-4 text-slate-400">
-              Start med to simple CSV-filer, som du nemt kan hente ud
-              fra de systemer, du allerede bruger.
+              Start med to simple filer fra de systemer, du allerede bruger.
+              FakturaTjek understøtter både CSV og Excel.
             </p>
           </div>
 
@@ -87,7 +88,7 @@ export default function Home() {
               <p className="text-sm font-semibold text-red-400">1</p>
               <h3 className="mt-2 font-bold">Eksportér ordrestyring</h3>
               <p className="mt-2 text-sm text-slate-400">
-                Hent en CSV med opgaver, timer, materialer og status fra
+                Hent en fil med opgaver, timer, materialer og status fra
                 ordrestyringssystemet.
               </p>
             </div>
@@ -96,8 +97,8 @@ export default function Home() {
               <p className="text-sm font-semibold text-red-400">2</p>
               <h3 className="mt-2 font-bold">Eksportér fakturaer</h3>
               <p className="mt-2 text-sm text-slate-400">
-                Hent en CSV med fakturaer, kunder, projekter, materialer, timer, beløb og
-                betalingsstatus.
+                Hent en fil med fakturaer, kunder, projekter, materialer, timer,
+                beløb og betalingsstatus.
               </p>
             </div>
 
@@ -125,7 +126,7 @@ export default function Home() {
               href="/upload"
               className="inline-flex rounded-xl bg-red-500 px-6 py-4 font-semibold text-white hover:bg-red-600"
             >
-              Prøv med CSV-filer
+              Prøv selv upload og analyse
             </Link>
           </div>
         </div>
