@@ -1,0 +1,6 @@
+faktura_id,kunde,projekt,status,timer_faktureret,materialer_faktureret,beloeb,dato
+F-1001,Andersen Ejendomme,El-installation lejlighed 1,betalt,8,2400,12400,2026-06-03
+F-1002,Fyns VVS Center,Tavlearbejde,sendt,10,0,5500,2026-06-04
+F-1003,Nordic Bolig,Køkkeninstallation,sendt,6,5000,8300,2026-06-05
+F-1004,Larsen Byg,Ny eltavle,sendt,8,1200,5600,2026-06-06
+F-2001,Nordhavn Montage,Varmepumpe service,forfalden,0,0,14500,2026-05-28

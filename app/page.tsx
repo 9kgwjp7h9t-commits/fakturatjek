@@ -31,7 +31,7 @@ export default function Home() {
               href="/upload"
               className="rounded-xl border border-red-500/40 bg-red-500/10 px-6 py-4 text-center font-semibold text-red-200 hover:bg-red-500/20"
             >
-              Prøv CSV-import
+              Prøv CSV-upload
             </Link>
 
             <a
