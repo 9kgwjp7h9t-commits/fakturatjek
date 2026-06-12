@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
-import type { RefObject } from "react";
+import type { ChangeEvent, RefObject } from "react";
 import * as XLSX from "xlsx";
 
 type RawRow = Record<string, string | undefined>;
@@ -104,10 +104,25 @@ const ORDER_FIELDS: FieldConfig<OrderField>[] = [
       "opgave_id",
       "opgave id",
       "opgaveid",
+      "opgavenr",
+      "opgave nr",
+      "opgavenummer",
+      "sagref",
+      "sagsref",
+      "sag ref",
+      "sags ref",
+      "sag reference",
+      "sagsreference",
       "sagsnummer",
       "sag nr",
       "sag nummer",
+      "reference",
+      "ref",
+      "opgave reference",
+      "ordre reference",
       "job id",
+      "job nr",
+      "jobnummer",
       "ordre id",
       "ordrenummer",
       "task id",
@@ -123,6 +138,7 @@ const ORDER_FIELDS: FieldConfig<OrderField>[] = [
       "kundenavn",
       "kundens navn",
       "navn",
+      "modtager",
       "debitor",
       "debitor navn",
       "firma",
@@ -144,10 +160,16 @@ const ORDER_FIELDS: FieldConfig<OrderField>[] = [
       "projektnavn",
       "sag",
       "sagsnavn",
-      "sagsnummer",
       "opgave",
       "opgavenavn",
       "arbejde",
+      "arbejdsbeskrivelse",
+      "beskrivelse",
+      "opgavebeskrivelse",
+      "jobbeskrivelse",
+      "tekst",
+      "ydelse",
+      "arbejdsopgave",
       "job",
       "jobnavn",
       "ordre",
@@ -156,6 +178,7 @@ const ORDER_FIELDS: FieldConfig<OrderField>[] = [
       "case",
       "task",
       "order",
+      "description",
     ],
     required: true,
   },
@@ -168,9 +191,6 @@ const ORDER_FIELDS: FieldConfig<OrderField>[] = [
       "fase",
       "opgavestatus",
       "sagsstatus",
-      "afsluttet",
-      "færdig",
-      "completed",
       "state",
     ],
     required: false,
@@ -181,6 +201,8 @@ const ORDER_FIELDS: FieldConfig<OrderField>[] = [
     aliases: [
       "timer",
       "antal timer",
+      "antal_arbejdstimer",
+      "arbejdstimer",
       "arbejdstid",
       "tid",
       "registreret tid",
@@ -202,8 +224,12 @@ const ORDER_FIELDS: FieldConfig<OrderField>[] = [
       "materialer beløb",
       "materialebeløb",
       "materiale beløb",
+      "varer_forbrug",
       "vareforbrug",
       "varer",
+      "varer forbrug",
+      "materiale forbrug",
+      "materialeforbrug",
       "material costs",
       "materials",
       "material amount",
@@ -219,6 +245,8 @@ const ORDER_FIELDS: FieldConfig<OrderField>[] = [
       "afsluttet dato",
       "udført dato",
       "udfoert dato",
+      "udført_den",
+      "udfoert_den",
       "date",
       "created",
       "completed date",
@@ -237,6 +265,12 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
       "fakturanummer",
       "faktura nr",
       "faktura nummer",
+      "bilagsnr",
+      "bilag nr",
+      "bilagsnummer",
+      "bilag",
+      "faktnr",
+      "fakt nr",
       "invoice id",
       "invoice number",
       "invoice no",
@@ -251,6 +285,7 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
       "kundenavn",
       "kundens navn",
       "navn",
+      "modtager",
       "debitor",
       "debitor navn",
       "firma",
@@ -272,10 +307,15 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
       "projektnavn",
       "sag",
       "sagsnavn",
-      "sagsnummer",
       "opgave",
       "opgavenavn",
       "arbejde",
+      "arbejdsbeskrivelse",
+      "beskrivelse",
+      "tekst",
+      "ydelse",
+      "fakturatekst",
+      "linjetekst",
       "job",
       "jobnavn",
       "ordre",
@@ -284,6 +324,7 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
       "case",
       "task",
       "order",
+      "description",
     ],
     required: true,
   },
@@ -292,13 +333,11 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
     label: "Status",
     aliases: [
       "status",
+      "betaling",
       "betalingsstatus",
       "fakturastatus",
       "tilstand",
       "fase",
-      "betalt",
-      "sendt",
-      "forfalden",
       "payment status",
       "invoice status",
     ],
@@ -311,6 +350,10 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
       "timer_faktureret",
       "timer faktureret",
       "fakturerede timer",
+      "arbejdstimer_paa_regning",
+      "arbejdstimer på regning",
+      "timer på regning",
+      "timer paa regning",
       "timer",
       "antal timer",
       "arbejdstid",
@@ -327,6 +370,8 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
       "materialer_faktureret",
       "materialer faktureret",
       "fakturerede materialer",
+      "materiale_salg",
+      "materiale salg",
       "materialer",
       "varer",
       "varelinjer",
@@ -344,6 +389,8 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
       "beløb",
       "fakturabeløb",
       "faktura beløb",
+      "totalpris",
+      "total pris",
       "total",
       "sum",
       "amount",
@@ -358,6 +405,8 @@ const INVOICE_FIELDS: FieldConfig<InvoiceField>[] = [
     aliases: [
       "dato",
       "fakturadato",
+      "sendt_den",
+      "sendt den",
       "oprettet",
       "date",
       "invoice date",
@@ -510,13 +559,39 @@ function formatHeaderLabel(header: string) {
   return labels[header] || header;
 }
 
-function isExactAliasMatch<T extends string>(
-  header: string,
-  field: FieldConfig<T>
-) {
+function getAliasMatchScore(header: string, alias: string) {
   const normalizedHeader = normalizeText(header);
+  const normalizedAlias = normalizeText(alias);
 
-  return field.aliases.some((alias) => normalizeText(alias) === normalizedHeader);
+  if (!normalizedHeader || !normalizedAlias) return 0;
+
+  if (normalizedHeader === normalizedAlias) {
+    return 100;
+  }
+
+  const headerWords = normalizedHeader.split(" ");
+  const aliasWords = normalizedAlias.split(" ");
+
+  if (
+    aliasWords.length > 1 &&
+    aliasWords.every((word) => headerWords.includes(word))
+  ) {
+    return 80;
+  }
+
+  if (normalizedHeader.includes(normalizedAlias) && normalizedAlias.length >= 5) {
+    return 60;
+  }
+
+  if (normalizedAlias.includes(normalizedHeader) && normalizedHeader.length >= 5) {
+    return 45;
+  }
+
+  return 0;
+}
+
+function isKnownAlias<T extends string>(header: string, field: FieldConfig<T>) {
+  return field.aliases.some((alias) => getAliasMatchScore(header, alias) >= 45);
 }
 
 function guessMapping<T extends string>(
@@ -533,20 +608,8 @@ function guessMapping<T extends string>(
     headers.forEach((header) => {
       if (usedHeaders.has(header)) return;
 
-      const normalizedHeader = normalizeText(header);
-
       field.aliases.forEach((alias) => {
-        const normalizedAlias = normalizeText(alias);
-
-        let score = 0;
-
-        if (normalizedHeader === normalizedAlias) {
-          score = 100;
-        } else if (normalizedHeader.includes(normalizedAlias)) {
-          score = 70;
-        } else if (normalizedAlias.includes(normalizedHeader)) {
-          score = 50;
-        }
+        const score = getAliasMatchScore(header, alias);
 
         if (score > bestScore) {
           bestScore = score;
@@ -555,7 +618,7 @@ function guessMapping<T extends string>(
       });
     });
 
-    if (bestHeader) {
+    if (bestHeader && bestScore >= 45) {
       mapping[field.key] = bestHeader;
       usedHeaders.add(bestHeader);
     }
@@ -571,16 +634,16 @@ function getMissingRequiredFields<T extends string>(
   return fields.filter((field) => field.required && !mapping[field.key]);
 }
 
-function getUncertainFields<T extends string>(
+function getRedFields<T extends string>(
   fields: FieldConfig<T>[],
   mapping: Mapping<T>
 ) {
   return fields.filter((field) => {
     const selectedHeader = mapping[field.key];
 
-    if (!selectedHeader) return false;
+    if (!selectedHeader) return true;
 
-    return !isExactAliasMatch(selectedHeader, field);
+    return !isKnownAlias(selectedHeader, field);
   });
 }
 
@@ -716,15 +779,22 @@ function textSimilarity(a: string | undefined, b: string | undefined) {
   return Math.max(tokenScore, editScore);
 }
 
-function dateDistanceScore(a?: string, b?: string) {
-  if (!a || !b) return 0;
+function dateDistanceScore(orderDate?: string, invoiceDate?: string) {
+  if (!orderDate || !invoiceDate) return 0;
 
-  const left = new Date(a);
-  const right = new Date(b);
+  const order = new Date(orderDate);
+  const invoice = new Date(invoiceDate);
 
-  if (Number.isNaN(left.getTime()) || Number.isNaN(right.getTime())) return 0;
+  if (Number.isNaN(order.getTime()) || Number.isNaN(invoice.getTime())) {
+    return 0;
+  }
 
-  const days = Math.abs(left.getTime() - right.getTime()) / (1000 * 60 * 60 * 24);
+  if (invoice.getTime() < order.getTime()) {
+    return 0;
+  }
+
+  const days =
+    Math.abs(invoice.getTime() - order.getTime()) / (1000 * 60 * 60 * 24);
 
   if (days <= 7) return 1;
   if (days <= 30) return 0.65;
@@ -738,7 +808,7 @@ function getMatchCandidateScore(order: OrderRow, invoice: InvoiceRow) {
   const projectScore = textSimilarity(order.projekt, invoice.projekt);
   const dateScore = dateDistanceScore(order.dato, invoice.dato);
 
-  const score = customerScore * 0.42 + projectScore * 0.42 + dateScore * 0.16;
+  const score = customerScore * 0.5 + projectScore * 0.4 + dateScore * 0.1;
   const reasons: string[] = [];
 
   if (customerScore >= 0.55) reasons.push("kundenavnet ligner");
@@ -783,20 +853,12 @@ function findMatchCandidates(
           return null;
         }
 
-        const {
-          score,
-          customerScore,
-          projectScore,
-          dateScore,
-          reasons,
-        } = getMatchCandidateScore(order, invoice);
+        const { score, customerScore, projectScore, reasons } =
+          getMatchCandidateScore(order, invoice);
 
         const shouldShow =
-          score >= 0.38 ||
-          customerScore >= 0.72 ||
-          projectScore >= 0.72 ||
-          (customerScore >= 0.52 && projectScore >= 0.35) ||
-          (customerScore >= 0.45 && projectScore >= 0.45 && dateScore >= 0.35);
+          customerScore >= 0.55 &&
+          (projectScore >= 0.35 || customerScore >= 0.8);
 
         if (!shouldShow) {
           return null;
@@ -811,7 +873,7 @@ function findMatchCandidates(
           reasons:
             reasons.length > 0
               ? reasons
-              : ["der er delvist overlap mellem kunde, projekt eller dato"],
+              : ["kunde og projekt ligner delvist hinanden"],
           order,
           invoice,
         };
@@ -836,7 +898,10 @@ function findMatchingOrderForInvoice(
   approvedMatches: ApprovedMatch[]
 ) {
   const exactOrder = orderRows.find((order) => {
-    return getMatchKey(order.kunde, order.projekt) === getMatchKey(invoice.kunde, invoice.projekt);
+    return (
+      getMatchKey(order.kunde, order.projekt) ===
+      getMatchKey(invoice.kunde, invoice.projekt)
+    );
   });
 
   if (exactOrder) return exactOrder;
@@ -1032,33 +1097,18 @@ export default function UploadPage() {
   const [matchCandidates, setMatchCandidates] = useState<MatchCandidate[]>([]);
   const [autoApprovedMatches, setAutoApprovedMatches] = useState<ApprovedMatch[]>([]);
   const [matchDecisions, setMatchDecisions] = useState<MatchDecision>({});
-  const [showOrderMapping, setShowOrderMapping] = useState(false);
-  const [showInvoiceMapping, setShowInvoiceMapping] = useState(false);
 
-  const missingOrderRequiredFields = getMissingRequiredFields(
-    ORDER_FIELDS,
-    orderMapping
-  );
-
-  const missingInvoiceRequiredFields = getMissingRequiredFields(
-    INVOICE_FIELDS,
-    invoiceMapping
-  );
-
-  const uncertainOrderFields = getUncertainFields(ORDER_FIELDS, orderMapping);
-  const uncertainInvoiceFields = getUncertainFields(INVOICE_FIELDS, invoiceMapping);
-
-  const orderNeedsReview =
-    orderFile.headers.length > 0 &&
-    (missingOrderRequiredFields.length > 0 || uncertainOrderFields.length > 0);
-
-  const invoiceNeedsReview =
-    invoiceFile.headers.length > 0 &&
-    (missingInvoiceRequiredFields.length > 0 ||
-      uncertainInvoiceFields.length > 0);
+  const redOrderFields = getRedFields(ORDER_FIELDS, orderMapping);
+  const redInvoiceFields = getRedFields(INVOICE_FIELDS, invoiceMapping);
 
   const orderMappingReady = hasRequiredMapping(ORDER_FIELDS, orderMapping);
   const invoiceMappingReady = hasRequiredMapping(INVOICE_FIELDS, invoiceMapping);
+
+  const shouldShowOrderMapping =
+    orderFile.headers.length > 0 && redOrderFields.length > 0;
+
+  const shouldShowInvoiceMapping =
+    invoiceFile.headers.length > 0 && redInvoiceFields.length > 0;
 
   const orderRows = useMemo(() => {
     if (!orderMappingReady) return [];
@@ -1107,7 +1157,7 @@ export default function UploadPage() {
     return problems.reduce((sum, problem) => sum + problem.amount, 0);
   }, [problems]);
 
-  async function handleOrderUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleOrderUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -1116,7 +1166,6 @@ export default function UploadPage() {
     setMatchCandidates([]);
     setAutoApprovedMatches([]);
     setMatchDecisions({});
-    setShowOrderMapping(false);
     setOrderFileName(file.name);
 
     const parsed = await parseUploadedFile(file);
@@ -1125,7 +1174,7 @@ export default function UploadPage() {
     setOrderMapping(guessMapping(parsed.headers, ORDER_FIELDS));
   }
 
-  async function handleInvoiceUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleInvoiceUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -1134,7 +1183,6 @@ export default function UploadPage() {
     setMatchCandidates([]);
     setAutoApprovedMatches([]);
     setMatchDecisions({});
-    setShowInvoiceMapping(false);
     setInvoiceFileName(file.name);
 
     const parsed = await parseUploadedFile(file);
@@ -1247,9 +1295,9 @@ export default function UploadPage() {
 
           <p className="mt-3 max-w-3xl text-slate-400">
             Upload én CSV- eller Excel-fil fra ordrestyring og én CSV- eller
-            Excel-fil fra fakturaprogrammet. FakturaTjek finder automatisk de
-            relevante kolonner. Hvis noget mangler eller virker usikkert, bliver
-            du bedt om at kontrollere det.
+            Excel-fil fra fakturaprogrammet. FakturaTjek forsøger automatisk at
+            finde de rigtige kolonner. Hvis en kolonne ikke kan placeres, bliver
+            du bedt om at vælge den manuelt.
           </p>
         </header>
 
@@ -1269,75 +1317,27 @@ export default function UploadPage() {
           />
         </section>
 
-        {!hasAnalyzed && !isReviewingMatches && orderNeedsReview && !showOrderMapping && (
-          <ReviewNotice
-            title="Kontrollér felter fra ordrestyring"
-            missingFields={missingOrderRequiredFields}
-            uncertainFields={uncertainOrderFields}
-            onEdit={() => setShowOrderMapping(true)}
+        {!hasAnalyzed && !isReviewingMatches && shouldShowOrderMapping && (
+          <MappingBox
+            title="Felter fra ordrestyring"
+            description="Kun felter der mangler eller ikke kunne genkendes, skal rettes. Grøn betyder fundet. Rød betyder mangler."
+            fields={ORDER_FIELDS}
+            headers={orderFile.headers}
+            mapping={orderMapping}
+            onChange={updateOrderMapping}
           />
         )}
 
-        {!hasAnalyzed && !isReviewingMatches && invoiceNeedsReview && !showInvoiceMapping && (
-          <ReviewNotice
-            title="Kontrollér felter fra fakturaprogram"
-            missingFields={missingInvoiceRequiredFields}
-            uncertainFields={uncertainInvoiceFields}
-            onEdit={() => setShowInvoiceMapping(true)}
+        {!hasAnalyzed && !isReviewingMatches && shouldShowInvoiceMapping && (
+          <MappingBox
+            title="Felter fra fakturaprogram"
+            description="Kun felter der mangler eller ikke kunne genkendes, skal rettes. Grøn betyder fundet. Rød betyder mangler."
+            fields={INVOICE_FIELDS}
+            headers={invoiceFile.headers}
+            mapping={invoiceMapping}
+            onChange={updateInvoiceMapping}
           />
         )}
-
-        {!hasAnalyzed &&
-          !isReviewingMatches &&
-          orderFile.headers.length > 0 &&
-          (showOrderMapping || missingOrderRequiredFields.length > 0) && (
-            <MappingBox
-              title={
-                missingOrderRequiredFields.length > 0 && !showOrderMapping
-                  ? "Vælg manglende felter fra ordrestyring"
-                  : "Ret felter fra ordrestyring"
-              }
-              description={
-                missingOrderRequiredFields.length > 0 && !showOrderMapping
-                  ? "FakturaTjek kunne ikke finde disse nødvendige felter automatisk."
-                  : "Ret kun noget, hvis FakturaTjek har valgt et forkert felt."
-              }
-              fields={
-                missingOrderRequiredFields.length > 0 && !showOrderMapping
-                  ? missingOrderRequiredFields
-                  : ORDER_FIELDS
-              }
-              headers={orderFile.headers}
-              mapping={orderMapping}
-              onChange={updateOrderMapping}
-            />
-          )}
-
-        {!hasAnalyzed &&
-          !isReviewingMatches &&
-          invoiceFile.headers.length > 0 &&
-          (showInvoiceMapping || missingInvoiceRequiredFields.length > 0) && (
-            <MappingBox
-              title={
-                missingInvoiceRequiredFields.length > 0 && !showInvoiceMapping
-                  ? "Vælg manglende felter fra fakturaprogram"
-                  : "Ret felter fra fakturaprogram"
-              }
-              description={
-                missingInvoiceRequiredFields.length > 0 && !showInvoiceMapping
-                  ? "FakturaTjek kunne ikke finde disse nødvendige felter automatisk."
-                  : "Ret kun noget, hvis FakturaTjek har valgt et forkert felt."
-              }
-              fields={
-                missingInvoiceRequiredFields.length > 0 && !showInvoiceMapping
-                  ? missingInvoiceRequiredFields
-                  : INVOICE_FIELDS
-              }
-              headers={invoiceFile.headers}
-              mapping={invoiceMapping}
-              onChange={updateInvoiceMapping}
-            />
-          )}
 
         {!hasAnalyzed && !isReviewingMatches && hasBothFiles && (
           <section className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6">
@@ -1442,7 +1442,7 @@ export default function UploadPage() {
 
         {hasAnalyzed && orderRows.length > 0 && (
           <DataTable
-            title="Data fra ordrestyring"
+            title="Data fra ordrestyringsprogram"
             description="Data efter kolonnerne er blevet matchet."
             headers={[
               "Opgave ID",
@@ -1535,7 +1535,7 @@ function UploadBox({
   title: string;
   description: string;
   fileName: string;
-  onChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
 }) {
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
@@ -1557,61 +1557,6 @@ function UploadBox({
           Valgt fil: <span className="text-white">{fileName}</span>
         </p>
       )}
-    </section>
-  );
-}
-
-function ReviewNotice<T extends string>({
-  title,
-  missingFields,
-  uncertainFields,
-  onEdit,
-}: {
-  title: string;
-  missingFields: FieldConfig<T>[];
-  uncertainFields: FieldConfig<T>[];
-  onEdit: () => void;
-}) {
-  return (
-    <section className="rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-6">
-      <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-yellow-100">{title}</h2>
-
-          {missingFields.length > 0 && (
-            <p className="mt-2 text-sm text-yellow-100/80">
-              Nogle nødvendige felter blev ikke fundet automatisk og skal vælges
-              manuelt.
-            </p>
-          )}
-
-          {missingFields.length === 0 && uncertainFields.length > 0 && (
-            <p className="mt-2 text-sm text-yellow-100/80">
-              FakturaTjek har fundet et muligt match, men nogle felter bør
-              kontrolleres.
-            </p>
-          )}
-
-          <div className="mt-4 flex flex-wrap gap-2">
-            {[...missingFields, ...uncertainFields].map((field) => (
-              <span
-                key={field.key}
-                className="rounded-full border border-yellow-500/30 bg-yellow-500/10 px-3 py-1 text-sm text-yellow-100"
-              >
-                {field.label}
-              </span>
-            ))}
-          </div>
-        </div>
-
-        <button
-          type="button"
-          onClick={onEdit}
-          className="rounded-xl border border-yellow-500/40 bg-yellow-500/10 px-5 py-3 text-sm font-semibold text-yellow-100 hover:bg-yellow-500/20"
-        >
-          Ret felter
-        </button>
-      </div>
     </section>
   );
 }
@@ -1999,28 +1944,74 @@ function MappingBox<T extends string>({
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
-        {fields.map((field) => (
-          <label key={field.key} className="block">
-            <span className="text-sm font-medium text-slate-300">
-              {field.label}
-              {field.required && <span className="text-red-400"> *</span>}
-            </span>
+        {fields.map((field) => {
+          const selectedValue = mapping[field.key];
+          const isGreen = Boolean(selectedValue) && isKnownAlias(selectedValue, field);
 
-            <select
-              value={mapping[field.key]}
-              onChange={(event) => onChange(field.key, event.target.value)}
-              className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 p-3 text-sm text-white"
+          return (
+            <label
+              key={field.key}
+              className={
+                isGreen
+                  ? "block rounded-2xl border border-green-500/40 bg-green-500/10 p-4"
+                  : "block rounded-2xl border border-red-500/60 bg-red-500/10 p-4"
+              }
             >
-              <option value="">Ikke valgt</option>
+              <div className="flex items-center justify-between gap-3">
+                <span
+                  className={
+                    isGreen
+                      ? "text-sm font-semibold text-green-200"
+                      : "text-sm font-semibold text-red-200"
+                  }
+                >
+                  {field.label}
+                  {field.required && <span className="text-red-400"> *</span>}
+                </span>
 
-              {headers.map((header) => (
-                <option key={header} value={header}>
-                  {formatHeaderLabel(header)}
-                </option>
-              ))}
-            </select>
-          </label>
-        ))}
+                {isGreen ? (
+                  <span className="rounded-full border border-green-500/30 bg-green-500/10 px-3 py-1 text-xs font-semibold text-green-200">
+                    Fundet
+                  </span>
+                ) : (
+                  <span className="rounded-full border border-red-500/40 bg-red-500/10 px-3 py-1 text-xs font-semibold text-red-200">
+                    Mangler
+                  </span>
+                )}
+              </div>
+
+              <select
+                value={selectedValue}
+                onChange={(event) => onChange(field.key, event.target.value)}
+                className={
+                  isGreen
+                    ? "mt-3 w-full rounded-xl border border-green-500/50 bg-slate-950 p-3 text-sm text-white outline-none focus:border-green-400"
+                    : "mt-3 w-full rounded-xl border border-red-500/70 bg-slate-950 p-3 text-sm text-white outline-none focus:border-red-400"
+                }
+              >
+                <option value="">Ikke valgt</option>
+
+                {headers.map((header) => (
+                  <option key={header} value={header}>
+                    {formatHeaderLabel(header)}
+                  </option>
+                ))}
+              </select>
+
+              {!isGreen && field.required && (
+                <p className="mt-2 text-xs text-red-200/80">
+                  Dette felt skal vælges, før analysen kan køre.
+                </p>
+              )}
+
+              {!isGreen && !field.required && (
+                <p className="mt-2 text-xs text-red-200/70">
+                  Valgfrit felt. Vælg det, hvis filen indeholder den kolonne.
+                </p>
+              )}
+            </label>
+          );
+        })}
       </div>
     </section>
   );
@@ -2069,7 +2060,7 @@ function DataTable({
             {rows.map((row, rowIndex) => (
               <tr key={rowIndex}>
                 {row.map((cell, cellIndex) => (
-                  <td key={cellIndex} className="p-4">
+                  <td key={`${rowIndex}-${cellIndex}`} className="p-4">
                     {cell || "-"}
                   </td>
                 ))}

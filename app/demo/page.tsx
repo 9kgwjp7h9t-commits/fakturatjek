@@ -23,6 +23,8 @@ type InvoiceRow = {
 
 type Problem = {
   type: "opgave" | "timer" | "materialer" | "faktura";
+  opgave_id?: string;
+  faktura_id?: string;
   kunde: string;
   projekt: string;
   status: string;
@@ -275,6 +277,37 @@ function getMatchKey(kunde: string, projekt: string) {
   return `${normalize(kunde)}|${normalize(projekt)}`;
 }
 
+function getProblemMeta(type: Problem["type"]) {
+  const meta = {
+    opgave: {
+      label: "Opgave",
+    },
+    timer: {
+      label: "Timer",
+    },
+    materialer: {
+      label: "Materialer",
+    },
+    faktura: {
+      label: "Faktura",
+    },
+  };
+
+  return meta[type];
+}
+
+function getInvoiceNumbers(invoices: InvoiceRow[]) {
+  return invoices.map((invoice) => invoice.faktura_id).join(", ");
+}
+
+function findMatchingOrder(invoice: InvoiceRow) {
+  const invoiceKey = getMatchKey(invoice.kunde, invoice.projekt);
+
+  return demoOrders.find((order) => {
+    return getMatchKey(order.kunde, order.projekt) === invoiceKey;
+  });
+}
+
 function findDemoProblems() {
   const problems: Problem[] = [];
   const invoiceMap = new Map<string, InvoiceRow[]>();
@@ -289,6 +322,7 @@ function findDemoProblems() {
   demoOrders.forEach((order) => {
     const key = getMatchKey(order.kunde, order.projekt);
     const matchingInvoices = invoiceMap.get(key) || [];
+    const invoiceNumbers = getInvoiceNumbers(matchingInvoices);
 
     const invoicedHours = matchingInvoices.reduce(
       (sum, invoice) => sum + invoice.timer_faktureret,
@@ -303,14 +337,17 @@ function findDemoProblems() {
     if (order.status.includes("afsluttet") && matchingInvoices.length === 0) {
       problems.push({
         type: "opgave",
+        opgave_id: order.opgave_id,
+        faktura_id: "",
         kunde: order.kunde,
         projekt: order.projekt,
         status: "afsluttet",
         dato: order.dato,
         amount: order.timer * HOURLY_RATE + order.materialer_beloeb,
         title: "Afsluttet opgave uden matchende faktura",
-        explanation: `Opgaven "${order.projekt}" er afsluttet, men der findes ingen matchende faktura.`,
-        action: "Kontroller om opgaven skal faktureres eller er registreret under et andet projektnavn.",
+        explanation: `Opgaven "${order.projekt}" hos ${order.kunde} er afsluttet, men der findes ingen matchende faktura.`,
+        action:
+          "Kontroller om opgaven er faktureret under et andet navn. Hvis ikke, bør opgaven faktureres eller markeres som ikke-fakturerbar.",
       });
 
       return;
@@ -321,14 +358,16 @@ function findDemoProblems() {
 
       problems.push({
         type: "timer",
+        opgave_id: order.opgave_id,
+        faktura_id: invoiceNumbers,
         kunde: order.kunde,
         projekt: order.projekt,
         status: "timer mangler på faktura",
         dato: order.dato,
         amount: missingHours * HOURLY_RATE,
         title: "Registrerede timer matcher ikke faktura",
-        explanation: `${order.timer} timer er registreret, men kun ${invoicedHours} timer er faktureret.`,
-        action: `Kontroller om ${missingHours} timer mangler på fakturaen.`,
+        explanation: `Der er registreret ${order.timer} timer på "${order.projekt}" hos ${order.kunde}, men kun ${invoicedHours} timer er fundet på matchende fakturaer.`,
+        action: `Kontroller om ${missingHours} timer mangler på fakturaen eller er registreret forkert.`,
       });
     }
 
@@ -337,36 +376,43 @@ function findDemoProblems() {
 
       problems.push({
         type: "materialer",
+        opgave_id: order.opgave_id,
+        faktura_id: invoiceNumbers,
         kunde: order.kunde,
         projekt: order.projekt,
         status: "materialer mangler på faktura",
         dato: order.dato,
         amount: missingMaterials,
         title: "Materialer matcher ikke faktura",
-        explanation: `${formatCurrency(
+        explanation: `Der er registreret materialer for ${formatCurrency(
           order.materialer_beloeb
-        )} er registreret som materialer, men kun ${formatCurrency(
+        )} på "${order.projekt}" hos ${order.kunde}, men kun ${formatCurrency(
           invoicedMaterials
-        )} er faktureret.`,
-        action: `Kontroller om ${formatCurrency(
+        )} er fundet på matchende fakturaer.`,
+        action: `Kontroller om materialer for ${formatCurrency(
           missingMaterials
-        )} i materialer mangler på fakturaen.`,
+        )} mangler på fakturaen eller er registreret forkert.`,
       });
     }
   });
 
   demoInvoices.forEach((invoice) => {
     if (invoice.status.includes("forfalden")) {
+      const matchingOrder = findMatchingOrder(invoice);
+
       problems.push({
         type: "faktura",
+        opgave_id: matchingOrder?.opgave_id,
+        faktura_id: invoice.faktura_id,
         kunde: invoice.kunde,
         projekt: invoice.projekt,
         status: "forfalden",
         dato: invoice.dato,
         amount: invoice.beloeb,
         title: "Forfalden faktura kræver opfølgning",
-        explanation: `Faktura ${invoice.faktura_id} er forfalden og bør følges op.`,
-        action: "Send betalingspåmindelse eller kontakt kunden.",
+        explanation: `Fakturaen til ${invoice.kunde} på "${invoice.projekt}" er markeret som forfalden i faktura-filen.`,
+        action:
+          "Send betalingspåmindelse eller ring til kunden. Fakturaen bør følges op, indtil den er betalt eller afklaret.",
       });
     }
   });
@@ -395,9 +441,10 @@ export default function DemoPage() {
           </h1>
 
           <p className="mt-3 max-w-3xl text-slate-400">
-              Her vises et realistisk eksempel på, hvordan FakturaTjek sammenligner data
-              fra ordrestyring og fakturaer. Demoen viser afsluttede opgaver, timer,
-              materialer og forfaldne fakturaer, der bør kontrolleres manuelt.
+            Her vises et realistisk eksempel på, hvordan FakturaTjek
+            sammenligner data fra ordrestyring og fakturaer. Demoen viser
+            afsluttede opgaver, timer, materialer og forfaldne fakturaer, der
+            bør kontrolleres manuelt.
           </p>
         </header>
 
@@ -414,59 +461,7 @@ export default function DemoPage() {
           <StatCard label="Potentiel værdi" value={formatCurrency(totalValue)} />
         </section>
 
-        <section className="overflow-hidden rounded-2xl border border-red-500/30 bg-red-500/10">
-          <div className="border-b border-red-500/20 p-6">
-            <h2 className="text-2xl font-bold text-red-300">
-              Fundne problemer
-            </h2>
-            <p className="mt-1 text-sm text-red-200/80">
-              Disse poster bør kontrolleres manuelt.
-            </p>
-          </div>
-
-          <div className="divide-y divide-red-500/20">
-            {demoProblems.map((problem, index) => (
-              <div
-                key={index}
-                className="grid grid-cols-1 gap-4 p-6 md:grid-cols-12 md:items-start"
-              >
-                <div className="md:col-span-2">
-                  <p className="font-semibold uppercase tracking-wide">
-                    {problem.type}
-                  </p>
-                  <p className="text-sm uppercase tracking-wide text-red-200/70">
-                    {problem.status}
-                  </p>
-                </div>
-
-                <div className="md:col-span-3">
-                  <p>{problem.kunde}</p>
-                  <p className="text-sm text-red-200/70">{problem.projekt}</p>
-                </div>
-
-                <div className="md:col-span-5">
-                  <p className="font-semibold text-red-100">
-                    {problem.title}
-                  </p>
-                  <p className="mt-1 text-sm text-red-200/80">
-                    {problem.explanation}
-                  </p>
-                  <p className="mt-2 text-sm font-medium text-red-100">
-                    Handling: {problem.action}
-                  </p>
-                </div>
-
-                <div className="md:col-span-1">
-                  <p className="text-sm text-red-200/70">{problem.dato}</p>
-                </div>
-
-                <div className="font-bold md:col-span-1 md:text-right">
-                  {formatCurrency(problem.amount)}
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
+        <ProblemResults problems={demoProblems} totalValue={totalValue} />
 
         <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <Link
@@ -536,6 +531,153 @@ export default function DemoPage() {
   );
 }
 
+function ProblemResults({
+  problems,
+  totalValue,
+}: {
+  problems: Problem[];
+  totalValue: number;
+}) {
+  return (
+    <section className="overflow-hidden rounded-3xl border border-slate-700/70 bg-slate-900/70">
+      <div className="border-b border-slate-700/60 p-6 md:p-8">
+        <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.25em] text-red-300">
+              Analyse
+            </p>
+
+            <h2 className="mt-3 text-3xl font-bold text-white md:text-4xl">
+              Fundne problemer
+            </h2>
+
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+              Disse poster bør kontrolleres manuelt. Start med de største beløb
+              og derefter de poster, der kræver hurtig opfølgning.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-2xl border border-slate-700 bg-slate-950/30 p-4 md:min-w-36">
+              <p className="text-xs uppercase tracking-widest text-slate-400">
+                Problemer
+              </p>
+              <p className="mt-2 text-2xl font-bold text-white">
+                {problems.length}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-700 bg-slate-950/30 p-4 md:min-w-44">
+              <p className="text-xs uppercase tracking-widest text-red-300">
+                Potentiel værdi
+              </p>
+              <p className="mt-2 text-2xl font-bold text-white">
+                {formatCurrency(totalValue)}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-2 p-4 md:p-6">
+        {problems.map((problem, index) => (
+          <ProblemCard key={index} problem={problem} index={index} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ProblemCard({
+  problem,
+  index,
+}: {
+  problem: Problem;
+  index: number;
+}) {
+  const meta = getProblemMeta(problem.type);
+  const invoiceNumber =
+    problem.faktura_id && problem.faktura_id.trim().length > 0
+      ? problem.faktura_id
+      : problem.type === "opgave"
+        ? "Ikke fundet"
+        : "-";
+
+  return (
+    <article className="rounded-xl border border-slate-700/70 bg-slate-900/75 p-5">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start">
+        <div className="lg:col-span-2">
+          <div className="border-l-4 border-red-400 pl-5">
+            <p className="text-xs uppercase tracking-widest text-slate-400">
+              Problem {index + 1}
+            </p>
+
+            <p className="mt-3 text-2xl font-bold text-white">{meta.label}</p>
+
+            <div className="mt-5 inline-flex rounded-xl border border-red-400/50 bg-red-500/10 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-red-300">
+              {problem.status}
+            </div>
+          </div>
+        </div>
+
+        <div className="border-slate-700/70 lg:col-span-3 lg:border-l lg:pl-8">
+          <p className="text-xs uppercase tracking-widest text-slate-400">
+            Kunde og projekt
+          </p>
+
+          <p className="mt-3 text-xl font-semibold text-white">
+            {problem.kunde}
+          </p>
+
+          <p className="mt-2 text-sm text-slate-300">{problem.projekt}</p>
+
+          <div className="mt-5 space-y-1 text-sm text-slate-400">
+            <p>
+              Opgave ID.:{" "}
+              <span className="text-slate-200">{problem.opgave_id || "-"}</span>
+            </p>
+
+            <p>
+              Faktura ID.:{" "}
+              <span className="text-slate-200">{invoiceNumber}</span>
+            </p>
+
+            {problem.dato && <p>Dato: {problem.dato}</p>}
+          </div>
+        </div>
+
+        <div className="lg:col-span-5">
+          <p className="text-xl font-bold text-white">{problem.title}</p>
+
+          <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
+            {problem.explanation}
+          </p>
+
+          <div className="mt-5 max-w-2xl rounded-lg border border-red-500/25 bg-red-500/10 p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-red-300">
+              Anbefalet handling
+            </p>
+
+            <p className="mt-2 text-sm leading-6 text-slate-100">
+              {problem.action}
+            </p>
+          </div>
+        </div>
+
+        <div className="lg:col-span-2 lg:text-right">
+          <p className="text-xs uppercase tracking-widest text-slate-400">
+            Værdi
+          </p>
+
+          <p className="mt-3 text-3xl font-bold text-white">
+            {formatCurrency(problem.amount)}
+          </p>
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
@@ -579,8 +721,8 @@ function DataTable({
             {rows.map((row, rowIndex) => (
               <tr key={rowIndex}>
                 {row.map((cell, cellIndex) => (
-                  <td key={cellIndex} className="p-4">
-                    {cell}
+                  <td key={`${rowIndex}-${cellIndex}`} className="p-4">
+                    {cell || "-"}
                   </td>
                 ))}
               </tr>
