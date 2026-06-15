@@ -93,6 +93,21 @@ type FieldConfig<T extends string> = {
 
 type Mapping<T extends string> = Record<T, string>;
 
+type ReportRow = {
+  "Problem nr.": number;
+  Problemtype: string;
+  Status: string;
+  Kunde: string;
+  Projekt: string;
+  "Opgave ID": string;
+  "Faktura ID": string;
+  Dato: string;
+  "Hvad er problemet?": string;
+  "Hvorfor er det fundet?": string;
+  "Hvad bør du gøre nu?": string;
+  "Potentiel værdi": string;
+};
+
 const HOURLY_RATE = 550;
 const AUTO_APPROVE_MATCH_SCORE = 0.92;
 
@@ -481,10 +496,10 @@ async function parseUploadedFile(file: File): Promise<ParsedCsv> {
 
     const worksheet = workbook.Sheets[firstSheetName];
 
-    const sheetRows = XLSX.utils.sheet_to_json<string[]>(worksheet, {
+    const sheetRows = XLSX.utils.sheet_to_json(worksheet, {
       header: 1,
       defval: "",
-    });
+    }) as string[][];
 
     const cleanedRows = sheetRows
       .map((row) => row.map((cell) => String(cell).trim()))
@@ -699,6 +714,28 @@ function formatCurrency(value: string | number | undefined) {
   }).format(toNumber(value));
 }
 
+function formatReportDate(date = new Date()) {
+  return new Intl.DateTimeFormat("da-DK", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatFileDate(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function escapeHtml(value: string | number | undefined) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function getMatchKey(kunde?: string, projekt?: string) {
   return `${normalizeText(kunde)}|${normalizeText(projekt)}`;
 }
@@ -713,6 +750,23 @@ function isInvoiceUsable(invoice: InvoiceRow) {
     status.includes("sendt") ||
     status.includes("faktureret") ||
     status.includes("forfalden")
+  );
+}
+
+function isCompletedOrderStatus(statusValue?: string) {
+  const status = normalizeText(statusValue);
+
+  if (!status) return false;
+
+  return (
+    status.includes("afsluttet") ||
+    status.includes("faerdig") ||
+    status.includes("færdig") ||
+    status.includes("udfoert") ||
+    status.includes("udført") ||
+    status.includes("completed") ||
+    status.includes("done") ||
+    status.includes("lukket")
   );
 }
 
@@ -935,7 +989,8 @@ function findProblems(
     const projekt = order.projekt || "Ukendt projekt";
     const status = normalizeText(order.status);
     const hasStatus = Boolean(status);
-    const shouldCheckOrder = hasStatus ? status.includes("afsluttet") : true;
+    const isCompletedOrder = isCompletedOrderStatus(order.status);
+    const shouldCheckOrder = hasStatus ? isCompletedOrder : true;
     const key = getMatchKey(order.kunde, order.projekt);
 
     const exactInvoices = (invoiceMap.get(key) || []).filter(isInvoiceUsable);
@@ -943,7 +998,7 @@ function findProblems(
     const approvedInvoices = approvedMatches
       .filter((match) => match.orderIndex === orderIndex)
       .map((match) => invoiceRows[match.invoiceIndex])
-      .filter(Boolean)
+      .filter((invoice): invoice is InvoiceRow => Boolean(invoice))
       .filter(isInvoiceUsable);
 
     const matchingInvoices = [...exactInvoices, ...approvedInvoices].filter(
@@ -975,7 +1030,7 @@ function findProblems(
         faktura_id: "",
         kunde,
         projekt,
-        status: hasStatus ? order.status || "afsluttet" : "status mangler",
+        status: "Manglende faktura",
         dato: order.dato,
         amount: estimatedValue,
         title: hasStatus
@@ -1001,7 +1056,7 @@ function findProblems(
         faktura_id: invoiceNumbers,
         kunde,
         projekt,
-        status: "timer mangler på faktura",
+        status: "Timer mangler på faktura",
         dato: order.dato,
         amount: missingHours * HOURLY_RATE,
         title: "Registrerede timer matcher ikke faktura",
@@ -1019,7 +1074,7 @@ function findProblems(
         faktura_id: invoiceNumbers,
         kunde,
         projekt,
-        status: "materialer mangler på faktura",
+        status: "Materialer mangler på faktura",
         dato: order.dato,
         amount: missingMaterials,
         title: "Materialer matcher ikke faktura",
@@ -1054,7 +1109,7 @@ function findProblems(
         faktura_id: invoice.faktura_id,
         kunde,
         projekt,
-        status: invoice.status || "forfalden",
+        status: "Forfalden faktura",
         dato: invoice.dato,
         amount: toNumber(invoice.beloeb),
         title: "Forfalden faktura kræver opfølgning",
@@ -1066,6 +1121,468 @@ function findProblems(
   });
 
   return problems;
+}
+
+function getProblemMeta(type: Problem["type"]) {
+  const meta = {
+    opgave: {
+      label: "Opgave",
+    },
+    timer: {
+      label: "Timer",
+    },
+    materialer: {
+      label: "Materialer",
+    },
+    faktura: {
+      label: "Faktura",
+    },
+  };
+
+  return meta[type];
+}
+
+function getReportRows(problems: Problem[]): ReportRow[] {
+  return problems.map((problem, index) => {
+    const meta = getProblemMeta(problem.type);
+
+    const invoiceNumber =
+      problem.faktura_id && problem.faktura_id.trim().length > 0
+        ? problem.faktura_id
+        : problem.type === "opgave"
+          ? "Ikke fundet"
+          : "-";
+
+    return {
+      "Problem nr.": index + 1,
+      Problemtype: meta.label,
+      Status: problem.status,
+      Kunde: problem.kunde,
+      Projekt: problem.projekt,
+      "Opgave ID": problem.opgave_id || "-",
+      "Faktura ID": invoiceNumber,
+      Dato: problem.dato || "-",
+      "Hvad er problemet?": problem.title,
+      "Hvorfor er det fundet?": problem.explanation,
+      "Hvad bør du gøre nu?": problem.action,
+      "Potentiel værdi": formatCurrency(problem.amount),
+    };
+  });
+}
+
+function downloadCsvReport(problems: Problem[]) {
+  const rows = getReportRows(problems);
+  const headers = [
+    "Problem nr.",
+    "Problemtype",
+    "Status",
+    "Kunde",
+    "Projekt",
+    "Opgave ID",
+    "Faktura ID",
+    "Dato",
+    "Hvad er problemet?",
+    "Hvorfor er det fundet?",
+    "Hvad bør du gøre nu?",
+    "Potentiel værdi",
+  ];
+
+  const escapeCsvValue = (value: string | number) => {
+    const text = String(value ?? "");
+
+    if (text.includes(";") || text.includes("\n") || text.includes('"')) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+
+    return text;
+  };
+
+  const csvContent = [
+    headers.join(";"),
+    ...rows.map((row) =>
+      headers
+        .map((header) => escapeCsvValue(row[header as keyof ReportRow]))
+        .join(";")
+    ),
+  ].join("\n");
+
+  const blob = new Blob([`\uFEFF${csvContent}`], {
+    type: "text/csv;charset=utf-8;",
+  });
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = `fakturatjek-rapport-${formatFileDate()}.csv`;
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+function downloadExcelReport(problems: Problem[]) {
+  const rows = getReportRows(problems);
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+
+  worksheet["!cols"] = [
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 26 },
+    { wch: 24 },
+    { wch: 28 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 40 },
+    { wch: 60 },
+    { wch: 60 },
+    { wch: 18 },
+  ];
+
+  const workbook = XLSX.utils.book_new();
+
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Fundne problemer");
+  XLSX.writeFile(workbook, `fakturatjek-rapport-${formatFileDate()}.xlsx`);
+}
+
+function downloadPdfReport({
+  problems,
+  totalValue,
+  orderCount,
+  invoiceCount,
+}: {
+  problems: Problem[];
+  totalValue: number;
+  orderCount: number;
+  invoiceCount: number;
+}) {
+  const createdAt = formatReportDate();
+
+  const problemRows = problems
+    .map((problem, index) => {
+      const meta = getProblemMeta(problem.type);
+
+      const invoiceNumber =
+        problem.faktura_id && problem.faktura_id.trim().length > 0
+          ? problem.faktura_id
+          : problem.type === "opgave"
+            ? "Ikke fundet"
+            : "-";
+
+      return `
+        <article class="problem-card">
+          <div class="problem-top">
+            <div>
+              <p class="eyebrow">Problem ${index + 1}</p>
+              <h2>${escapeHtml(meta.label)}</h2>
+              <span class="status">${escapeHtml(problem.status)}</span>
+            </div>
+
+            <div class="value-box">
+              <p>Værdi</p>
+              <strong>${escapeHtml(formatCurrency(problem.amount))}</strong>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div>
+              <p class="label">Kunde</p>
+              <p class="main">${escapeHtml(problem.kunde)}</p>
+            </div>
+
+            <div>
+              <p class="label">Projekt</p>
+              <p class="main">${escapeHtml(problem.projekt)}</p>
+            </div>
+
+            <div>
+              <p class="label">Opgave ID</p>
+              <p>${escapeHtml(problem.opgave_id || "-")}</p>
+            </div>
+
+            <div>
+              <p class="label">Faktura ID</p>
+              <p>${escapeHtml(invoiceNumber)}</p>
+            </div>
+
+            <div>
+              <p class="label">Dato</p>
+              <p>${escapeHtml(problem.dato || "-")}</p>
+            </div>
+          </div>
+
+          <div class="section">
+            <p class="section-title">Hvad er problemet?</p>
+            <p>${escapeHtml(problem.title)}</p>
+          </div>
+
+          <div class="section">
+            <p class="section-title">Hvorfor er det fundet?</p>
+            <p>${escapeHtml(problem.explanation)}</p>
+          </div>
+
+          <div class="action">
+            <p class="section-title">Hvad bør du gøre nu?</p>
+            <p>${escapeHtml(problem.action)}</p>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  const html = `
+    <!doctype html>
+    <html lang="da">
+      <head>
+        <meta charset="utf-8" />
+        <title>FakturaTjek analyse-rapport</title>
+        <style>
+          * { box-sizing: border-box; }
+          body {
+            margin: 0;
+            background: #f8fafc;
+            color: #0f172a;
+            font-family: Arial, Helvetica, sans-serif;
+          }
+          .page {
+            max-width: 980px;
+            margin: 0 auto;
+            padding: 48px;
+          }
+          .header {
+            border-bottom: 4px solid #ef4444;
+            padding-bottom: 24px;
+            margin-bottom: 28px;
+          }
+          .brand {
+            color: #ef4444;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: 13px;
+          }
+          h1 {
+            margin: 10px 0 0;
+            font-size: 36px;
+            line-height: 1.1;
+          }
+          .date {
+            margin-top: 10px;
+            color: #64748b;
+            font-size: 14px;
+          }
+          .summary {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 14px;
+            margin: 28px 0;
+          }
+          .summary-card {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 18px;
+            padding: 18px;
+          }
+          .summary-card p {
+            margin: 0;
+            color: #64748b;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-weight: 700;
+          }
+          .summary-card strong {
+            display: block;
+            margin-top: 8px;
+            font-size: 24px;
+          }
+          .intro {
+            background: #fff1f2;
+            border: 1px solid #fecdd3;
+            color: #7f1d1d;
+            border-radius: 18px;
+            padding: 18px;
+            line-height: 1.6;
+            margin-bottom: 26px;
+          }
+          .problem-card {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 22px;
+            padding: 24px;
+            margin-bottom: 18px;
+            page-break-inside: avoid;
+          }
+          .problem-top {
+            display: flex;
+            justify-content: space-between;
+            gap: 24px;
+            border-bottom: 1px solid #e2e8f0;
+            padding-bottom: 18px;
+            margin-bottom: 18px;
+          }
+          .eyebrow {
+            margin: 0;
+            color: #64748b;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            font-weight: 700;
+          }
+          h2 {
+            margin: 6px 0 12px;
+            font-size: 26px;
+          }
+          .status {
+            display: inline-block;
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+            border-radius: 999px;
+            padding: 8px 12px;
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+          }
+          .value-box {
+            text-align: right;
+            min-width: 160px;
+          }
+          .value-box p {
+            margin: 0;
+            color: #64748b;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-weight: 700;
+          }
+          .value-box strong {
+            display: block;
+            margin-top: 8px;
+            font-size: 26px;
+          }
+          .grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-bottom: 18px;
+          }
+          .label {
+            margin: 0 0 4px;
+            color: #64748b;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-weight: 800;
+          }
+          .main {
+            font-weight: 800;
+            font-size: 16px;
+          }
+          .section {
+            margin-top: 16px;
+          }
+          .section p {
+            line-height: 1.55;
+          }
+          .section-title {
+            margin: 0 0 6px;
+            color: #991b1b;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            font-weight: 900;
+          }
+          .action {
+            margin-top: 18px;
+            background: #fff1f2;
+            border: 1px solid #fecdd3;
+            border-radius: 16px;
+            padding: 16px;
+          }
+          .footer {
+            margin-top: 34px;
+            padding-top: 18px;
+            border-top: 1px solid #e2e8f0;
+            color: #64748b;
+            font-size: 13px;
+          }
+          @media print {
+            body { background: white; }
+            .page {
+              max-width: none;
+              padding: 28px;
+            }
+            .problem-card { break-inside: avoid; }
+          }
+        </style>
+      </head>
+
+      <body>
+        <main class="page">
+          <header class="header">
+            <div class="brand">FakturaTjek</div>
+            <h1>Analyse-rapport</h1>
+            <div class="date">Rapport oprettet: ${escapeHtml(createdAt)}</div>
+          </header>
+
+          <section class="summary">
+            <div class="summary-card">
+              <p>Opgaver læst</p>
+              <strong>${escapeHtml(orderCount)}</strong>
+            </div>
+            <div class="summary-card">
+              <p>Fakturaer læst</p>
+              <strong>${escapeHtml(invoiceCount)}</strong>
+            </div>
+            <div class="summary-card">
+              <p>Fundne problemer</p>
+              <strong>${escapeHtml(problems.length)}</strong>
+            </div>
+            <div class="summary-card">
+              <p>Potentiel værdi</p>
+              <strong>${escapeHtml(formatCurrency(totalValue))}</strong>
+            </div>
+          </section>
+
+          <section class="intro">
+            Rapporten viser poster, som FakturaTjek vurderer bør kontrolleres manuelt.
+            FakturaTjek laver ikke bogføring, ændrer ikke dine data og er ikke et endeligt facit.
+          </section>
+
+          ${problemRows}
+
+          <footer class="footer">
+            <strong>FakturaTjek</strong><br />
+            Kontakt: kontakt@fakturatjek.net
+          </footer>
+        </main>
+
+        <script>
+          window.onload = function () {
+            setTimeout(function () {
+              window.print();
+            }, 300);
+          };
+        </script>
+      </body>
+    </html>
+  `;
+
+  const reportWindow = window.open("", "_blank");
+
+  if (!reportWindow) {
+    alert("Rapporten kunne ikke åbnes. Tillad popups og prøv igen.");
+    return;
+  }
+
+  reportWindow.document.open();
+  reportWindow.document.write(html);
+  reportWindow.document.close();
 }
 
 export default function UploadPage() {
@@ -1405,20 +1922,26 @@ export default function UploadPage() {
         )}
 
         {hasAnalyzed && (
-          <section
-            ref={analysisRef}
-            className="scroll-mt-8 grid grid-cols-1 gap-4 md:grid-cols-4"
-          >
-            <StatCard label="Opgaver læst" value={orderRows.length.toString()} />
-            <StatCard
-              label="Fakturaer læst"
-              value={invoiceRows.length.toString()}
+          <section ref={analysisRef} className="scroll-mt-8 space-y-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+              <StatCard label="Opgaver læst" value={orderRows.length.toString()} />
+              <StatCard
+                label="Fakturaer læst"
+                value={invoiceRows.length.toString()}
+              />
+              <StatCard
+                label="Fundne problemer"
+                value={problems.length.toString()}
+              />
+              <StatCard label="Potentiel værdi" value={formatCurrency(totalValue)} />
+            </div>
+
+            <AnalysisSummary
+              orderCount={orderRows.length}
+              invoiceCount={invoiceRows.length}
+              problemCount={problems.length}
+              totalValue={totalValue}
             />
-            <StatCard
-              label="Fundne problemer"
-              value={problems.length.toString()}
-            />
-            <StatCard label="Potentiel værdi" value={formatCurrency(totalValue)} />
           </section>
         )}
 
@@ -1435,7 +1958,12 @@ export default function UploadPage() {
         )}
 
         {hasAnalyzed && problems.length > 0 && (
-          <ProblemResults problems={problems} totalValue={totalValue} />
+          <ProblemResults
+            problems={problems}
+            totalValue={totalValue}
+            orderCount={orderRows.length}
+            invoiceCount={invoiceRows.length}
+          />
         )}
 
         {hasAnalyzed && <AnalysisHelpBox />}
@@ -1521,8 +2049,49 @@ export default function UploadPage() {
             </a>
           </div>
         </section>
+
+        <SafetyAndPrivacySection />
       </div>
     </main>
+  );
+}
+
+function SafetyAndPrivacySection() {
+  return (
+    <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6">
+        <p className="text-sm font-semibold uppercase tracking-[0.25em] text-red-300">
+          Sikkerhedstekst
+        </p>
+
+        <h2 className="mt-3 text-2xl font-bold text-white">
+          Kontrolværktøj — ikke bogføring
+        </h2>
+
+        <p className="mt-3 text-sm leading-6 text-red-100/85">
+          FakturaTjek laver ikke bogføring og ændrer ikke dine data. Analysen
+          viser poster, der bør kontrolleres manuelt, og skal bruges som en
+          hjælp til opfølgning — ikke som et endeligt facit.
+        </p>
+      </div>
+
+      <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+        <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400">
+          Privacy
+        </p>
+
+        <h2 className="mt-3 text-2xl font-bold text-white">
+          Dine filer behandles lokalt
+        </h2>
+
+        <p className="mt-3 text-sm leading-6 text-slate-400">
+          FakturaTjek analyserer dine CSV- og Excel-filer direkte i din egen
+          browser. Filerne uploades ikke til en server, og vi gemmer ikke dine
+          data. Analysen bruges kun til at vise resultaterne på siden og til de
+          rapporter, du selv vælger at downloade.
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -1730,6 +2299,48 @@ function MatchReviewSection({
   );
 }
 
+function AnalysisSummary({
+  orderCount,
+  invoiceCount,
+  problemCount,
+  totalValue,
+}: {
+  orderCount: number;
+  invoiceCount: number;
+  problemCount: number;
+  totalValue: number;
+}) {
+  return (
+    <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+      <p className="text-sm font-semibold uppercase tracking-[0.25em] text-red-300">
+        Kort opsummering
+      </p>
+
+      <h2 className="mt-3 text-2xl font-bold text-white">
+        FakturaTjek har gennemgået dine filer
+      </h2>
+
+      <p className="mt-3 max-w-4xl text-sm leading-6 text-slate-300">
+        FakturaTjek har læst {orderCount} opgaver og {invoiceCount} fakturaer.
+        Der er fundet {problemCount} {problemCount === 1 ? "post" : "poster"},
+        som bør kontrolleres manuelt. Den samlede potentielle værdi er{" "}
+        <span className="font-semibold text-white">{formatCurrency(totalValue)}</span>.
+      </p>
+
+      {problemCount > 0 ? (
+        <p className="mt-3 text-sm leading-6 text-slate-400">
+          Start med posterne med højest værdi. Derefter bør du kontrollere
+          forfaldne fakturaer og poster, hvor timer eller materialer ikke matcher.
+        </p>
+      ) : (
+        <p className="mt-3 text-sm leading-6 text-slate-400">
+          Der blev ikke fundet tydelige uoverensstemmelser i de uploadede filer.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function AnalysisHelpBox() {
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
@@ -1758,57 +2369,187 @@ function AnalysisHelpBox() {
 function ProblemResults({
   problems,
   totalValue,
+  orderCount,
+  invoiceCount,
 }: {
   problems: Problem[];
   totalValue: number;
+  orderCount: number;
+  invoiceCount: number;
 }) {
+  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+
   return (
-    <section className="overflow-hidden rounded-3xl border border-slate-700/70 bg-slate-900/70">
-      <div className="border-b border-slate-700/60 p-6 md:p-8">
-        <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.25em] text-red-300">
-              Analyse
-            </p>
+    <>
+      <section className="overflow-hidden rounded-3xl border border-slate-700/70 bg-slate-900/70">
+        <div className="border-b border-slate-700/60 p-6 md:p-8">
+          <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.25em] text-red-300">
+                Analyse
+              </p>
 
-            <h2 className="mt-3 text-3xl font-bold text-white md:text-4xl">
-              Fundne problemer
-            </h2>
+              <h2 className="mt-3 text-3xl font-bold text-white md:text-4xl">
+                Fundne problemer
+              </h2>
 
-            <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
-              Disse poster bør kontrolleres manuelt. Start med de største beløb
-              og derefter de poster, der kræver hurtig opfølgning.
-            </p>
+              <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+                Her er de konkrete poster, FakturaTjek har fundet. Hver boks
+                viser hvad problemet er, hvorfor det er fundet, hvad du bør gøre
+                nu, og hvilken potentiel værdi posten har.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-2xl border border-slate-700 bg-slate-950/30 p-4 md:min-w-36">
+                <p className="text-xs uppercase tracking-widest text-slate-400">
+                  Problemer
+                </p>
+                <p className="mt-2 text-2xl font-bold text-white">
+                  {problems.length}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-700 bg-slate-950/30 p-4 md:min-w-44">
+                <p className="text-xs uppercase tracking-widest text-red-300">
+                  Potentiel værdi
+                </p>
+                <p className="mt-2 text-2xl font-bold text-white">
+                  {formatCurrency(totalValue)}
+                </p>
+              </div>
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-2xl border border-slate-700 bg-slate-950/30 p-4 md:min-w-36">
-              <p className="text-xs uppercase tracking-widest text-slate-400">
-                Problemer
-              </p>
-              <p className="mt-2 text-2xl font-bold text-white">
-                {problems.length}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-700 bg-slate-950/30 p-4 md:min-w-44">
-              <p className="text-xs uppercase tracking-widest text-red-300">
-                Potentiel værdi
-              </p>
-              <p className="mt-2 text-2xl font-bold text-white">
-                {formatCurrency(totalValue)}
-              </p>
-            </div>
+          <div className="mt-6">
+            <button
+              type="button"
+              onClick={() => setIsReportModalOpen(true)}
+              className="rounded-xl bg-red-500 px-6 py-4 font-semibold text-white hover:bg-red-600"
+            >
+              Download rapport
+            </button>
           </div>
         </div>
-      </div>
 
-      <div className="space-y-2 p-4 md:p-6">
-        {problems.map((problem, index) => (
-          <ProblemCard key={index} problem={problem} index={index} />
-        ))}
+        <div className="space-y-2 p-4 md:p-6">
+          {problems.map((problem, index) => (
+            <ProblemCard key={index} problem={problem} index={index} />
+          ))}
+        </div>
+      </section>
+
+      {isReportModalOpen && (
+        <ReportDownloadModal
+          problems={problems}
+          totalValue={totalValue}
+          orderCount={orderCount}
+          invoiceCount={invoiceCount}
+          onClose={() => setIsReportModalOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+function ReportDownloadModal({
+  problems,
+  totalValue,
+  orderCount,
+  invoiceCount,
+  onClose,
+}: {
+  problems: Problem[];
+  totalValue: number;
+  orderCount: number;
+  invoiceCount: number;
+  onClose: () => void;
+}) {
+  function handlePdfDownload() {
+    downloadPdfReport({
+      problems,
+      totalValue,
+      orderCount,
+      invoiceCount,
+    });
+
+    onClose();
+  }
+
+  function handleExcelDownload() {
+    downloadExcelReport(problems);
+    onClose();
+  }
+
+  function handleCsvDownload() {
+    downloadCsvReport(problems);
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-3xl border border-slate-700 bg-slate-950 p-6 shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.25em] text-red-300">
+              Download rapport
+            </p>
+
+            <h2 className="mt-3 text-2xl font-bold text-white">
+              Vælg rapportformat
+            </h2>
+
+            <p className="mt-2 text-sm leading-6 text-slate-400">
+              Vælg om rapporten skal gemmes som PDF, Excel eller CSV.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-slate-700 px-3 py-1 text-sm text-slate-300 hover:bg-slate-900"
+            aria-label="Luk"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 gap-3">
+          <button
+            type="button"
+            onClick={handlePdfDownload}
+            className="rounded-2xl bg-red-500 px-6 py-4 text-left font-semibold text-white hover:bg-red-600"
+          >
+            PDF-rapport
+            <span className="mt-1 block text-sm font-normal text-red-50/90">
+              Flot rapport klar til print eller deling.
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExcelDownload}
+            className="rounded-2xl border border-red-500/40 bg-red-500/10 px-6 py-4 text-left font-semibold text-red-100 hover:bg-red-500/20"
+          >
+            Excel-rapport
+            <span className="mt-1 block text-sm font-normal text-red-100/75">
+              God til videre arbejde, filtrering og opfølgning.
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleCsvDownload}
+            className="rounded-2xl border border-red-500/40 bg-red-500/10 px-6 py-4 text-left font-semibold text-red-100 hover:bg-red-500/20"
+          >
+            CSV-rapport
+            <span className="mt-1 block text-sm font-normal text-red-100/75">
+              Simpelt format, der kan åbnes i Excel og andre systemer.
+            </span>
+          </button>
+        </div>
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -1820,12 +2561,6 @@ function ProblemCard({
   index: number;
 }) {
   const meta = getProblemMeta(problem.type);
-  const invoiceNumber =
-    problem.faktura_id && problem.faktura_id.trim().length > 0
-      ? problem.faktura_id
-      : problem.type === "opgave"
-        ? "Ikke fundet"
-        : "-";
 
   return (
     <article className="rounded-xl border border-slate-700/70 bg-slate-900/75 p-5">
@@ -1863,7 +2598,13 @@ function ProblemCard({
 
             <p>
               Faktura ID.:{" "}
-              <span className="text-slate-200">{invoiceNumber}</span>
+              <span className="text-slate-200">
+                {problem.faktura_id && problem.faktura_id.trim().length > 0
+                  ? problem.faktura_id
+                  : problem.type === "opgave"
+                    ? "Ikke fundet"
+                    : "-"}
+              </span>
             </p>
 
             {problem.dato && <p>Dato: {problem.dato}</p>}
@@ -1871,15 +2612,25 @@ function ProblemCard({
         </div>
 
         <div className="lg:col-span-5">
-          <p className="text-xl font-bold text-white">{problem.title}</p>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-red-300">
+              Hvad er problemet?
+            </p>
+            <p className="mt-2 text-xl font-bold text-white">{problem.title}</p>
+          </div>
 
-          <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
-            {problem.explanation}
-          </p>
+          <div className="mt-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Hvorfor er det fundet?
+            </p>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
+              {problem.explanation}
+            </p>
+          </div>
 
           <div className="mt-5 max-w-2xl rounded-lg border border-red-500/25 bg-red-500/10 p-4">
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-red-300">
-              Anbefalet handling
+              Hvad bør du gøre nu?
             </p>
 
             <p className="mt-2 text-sm leading-6 text-slate-100">
@@ -1900,25 +2651,6 @@ function ProblemCard({
       </div>
     </article>
   );
-}
-
-function getProblemMeta(type: Problem["type"]) {
-  const meta = {
-    opgave: {
-      label: "Opgave",
-    },
-    timer: {
-      label: "Timer",
-    },
-    materialer: {
-      label: "Materialer",
-    },
-    faktura: {
-      label: "Faktura",
-    },
-  };
-
-  return meta[type];
 }
 
 function MappingBox<T extends string>({
